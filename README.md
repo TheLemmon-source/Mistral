@@ -46,6 +46,41 @@ valor en `C[dst]`, `delta` por tic, topes con resets especificos
 por frame, asi los contadores avanzan solos en ventana. Persisten como
 lineas `W idx + 9 doubles` en `oroga.dbg`.
 
+## Pick por zonas anidables
+
+El pick (`elige`) ya no recorre la lista colada entera: desciende como el
+render (mismo orden de colado, mismo doble pase del pin) y cada
+**zona** (`'p'` panel, `'q'` sesion, `'c'` cubo) funciona como caja
+cancelante: si el punto cae fuera de su rect, la rama entera se
+cancela sin recorrer hijos. Los nodos pintados despues ganan, como en
+pantalla. La lista colada `gLin` queda como aviso estadistico, no como
+indispensable del pick.
+
+## Deshacer
+
+Toda asignacion de estado que pasa por la GUI queda logueada por
+**grupos** (un clic = un grupo, una tecla = un grupo, un arrastre = un
+grupo): canal, valor previo y etiqueta previa. `U` repone el ultimo
+grupo completo en reversa. Borrar y reordenar en z no se reponen
+(quedan para filas SM). Sin lugar en el anillo de 128 entradas el
+fondo se pierde (aviso implicito), nunca corrompe.
+
+## Camara global
+
+`gCamX`/`gCamY` volatiles: **pantalla = mundo - camara**. El escritor
+la mueve con op `8` (`ordP(8, 0, dx, dy, 0,0,0,0)`); flechas del teclado
+la desplazan a pasos de 32 px y `C` la vuelve al origen. El render
+reubica cada cache de raiz con la camara; el pick convierte
+pantalla -> mundo antes de bajar por zonas.
+
+## Filas desde texto (fTx)
+
+`fTx(nodo, texto)` genera filas en runtime desde texto: una linea (o
+segmento entre `;`) con 6 numeros crea una fila SM `f6`; con 9 crea un
+contador `n9`; cualquier otra cuenta se descarta. Los valores son
+doubles (condiciones fraccionarias incluidas). Es el comienzo del
+parser general: el conteo de numeros por linea sustituye la gramatica.
+
 ## Compilar
 
 Con GCC (MinGW64 en Windows):

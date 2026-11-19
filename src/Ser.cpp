@@ -18,6 +18,12 @@
 //  escritor : unico (par obrero en Win; sicrono en pruebas). La GUI encola.
 //  raster   : cache por version (solo repinta si cambia el gen), colado en
 //             orden de A[] (el mismo orden sirve para pick, multiply z).
+//  deshacer : log de asignaciones por grupos; U repone el ultimo grupo.
+//  fTx      : filas f6/n9 generadas desde texto (conteo de numeros por linea).
+//  camara G : gCamX/gCamY volatiles: pantalla = mundo - camara; op 8 del
+//             escritor mueve la camara, C la vuelve al origen.
+//  pick Z   : pick recursivo por zonas anidables: panel/sesion/cubo que no
+//             contiene al punto cancela su sub-arbol (no recorre todo).
 //  guardia  : asignaciones de x/y se recortan al fol y esquivan hermanos.
 //  oroga.dbg: N = nodo, V = fila SM; carga si existe y guarda el arbol vivo.
 // ============================================================================
@@ -139,6 +145,7 @@ static void serAl(Ser* s) {
         xMe(s->M[i]); s->M[i] = 0;
     }
     s->nM = 0;
+    s->tc = 0;                           // muerto: tc != 0 significa vivo
     if (serPoolU >= serPoolN) {          // pool: capacidad real, no declarada
         Ser** op = (Ser**)realloc(serPool, (serPoolN + 8) * sizeof(Ser*));
         if (!op) exit(1);
@@ -158,6 +165,39 @@ static void ccS(Ser* s, long i, long v) {
     s->C[i] = v;
     s->vr++;
     gGen++;
+}
+
+// ---- [U] deshacer: log de asignaciones por grupos ----------------------------
+struct Lg { Ser* t; long g; long ci; long old; char* olb; };
+static struct Lg gLg[128];
+static long gLgN = 0;                    // entradas usadas
+static long gLgG = 0;                    // grupo de acciones actual
+
+static void lgEmp() { gLgG++; }          // accion nueva del usuario: grupo nuevo
+static void lgE(Ser* t, long ci, long old, char* olb) {
+    if (!t || t->tc == 0) { xMe(olb); return; }      // muerto: no se loguea
+    if (gLgN >= 128) {                   // sin lugar: se pierde el fondo
+        for (long i = 0; i < gLgN; i++) xMe(gLg[i].olb);
+        gLgN = 0;
+    }
+    gLg[gLgN].t = t; gLg[gLgN].g = gLgG; gLg[gLgN].ci = ci;
+    gLg[gLgN].old = old; gLg[gLgN].olb = olb;
+    gLgN++;
+}
+static void deshacer() {                 // repone el ultimo grupo completo
+    if (gLgN <= 0) return;
+    long g = gLg[gLgN - 1].g;
+    long i = gLgN - 1;
+    while (i > 0 && gLg[i - 1].g == g) i--;
+    for (long j = gLgN - 1; j >= i; j--) {           // en reversa
+        Ser* t = gLg[j].t;
+        if (!t || t->tc == 0) { xMe(gLg[j].olb); continue; }
+        if (gLg[j].ci == -2) {                        // etiqueta: se repone
+            if (gLg[j].olb) { xMe(t->lb); t->lb = gLg[j].olb; gLg[j].olb = 0; }
+        } else ccS(t, gLg[j].ci, gLg[j].old);
+        t->vr++; gGen++;
+    }
+    gLgN = i;
 }
 
 // ---- [V] SM: filas de condicion y asignacion --------------------------------
@@ -243,6 +283,34 @@ static void tickN9(Ser* s) {              // contadores vivos: recorre el arbol
     exN9(s);
     for (long i = 0; i < s->nA; i++) tickN9(s->A[i]);
 }
+static long fTx(Ser* s, const char* dtx) { // filas desde texto: conteo por linea
+    if (!s || !dtx) return 0;
+    long hechas = 0;
+    const char* p = dtx;                   // lineas por \n o ';': solo numeros
+    while (*p) {
+        double v[9]; long k = 0;
+        while (*p && *p != '\n' && *p != ';') {
+            while (*p == ' ' || *p == ',' || *p == '\t') p++;
+            if (!*p || *p == '\n' || *p == ';') break;
+            char* q;
+            double d = strtod(p, &q);
+            if (q == p) { p++; continue; }
+            if (k < 9) v[k] = d;
+            k++;
+            p = q;
+        }
+        if (k == 9) {
+            n9Add(s, v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8]);
+            hechas++;
+        } else if (k >= 6) {
+            f6Add(s, v[0], v[1], v[2], v[3], v[4], v[5]);
+            hechas++;
+        }
+        while (*p && *p != '\n' && *p != ';') p++;
+        if (*p) p++;
+    }
+    return hechas;
+}
 
 // ---- [Q] cola de ordenes (GUI -> escritor unico) ----------------------------
 struct Ord { long k; Ser* t; long r[6]; char ch; char* tx; };
@@ -299,6 +367,9 @@ static Ser* gInspPn = 0;                // check pin
 static Ser* gInspR = 0; static Ser* gInspG = 0;
 static Ser* gInspB = 0; static Ser* gInspRad = 0;
 static long gEdito = 0;                 // escribiendo etiqueta del objetivo
+static volatile long gCamX = 0, gCamY = 0;  // camara global: pantalla = mundo - cam
+static volatile long gCamVer = 0;       // version de camara: invalida el volcado
+static long gCamVisto = -1;
 __attribute__((unused)) static long gCamF = 0;                  // fase de la fuente
 __attribute__((unused)) static unsigned int gBufCam[32 * 24];   // marco sintetico
 static volatile long gFS = 2;           // escala de texto: celdas por glifo
@@ -636,7 +707,7 @@ static void blit(long long* c4, int dx, int dy) { // cache vigente: volcado
 }
 static void pintaTodo() {
     if (!gImg) return;
-    if (gImgGen == gGen) return;                  // 0) nada cambio en TODO
+    if (gImgGen == gGen && gCamVisto == gCamVer) return;   // nada cambio en TODO
     gTgt = gImg; gTW = gW; gTH = gH;
     gLinN = 0;
     listaRec(gRoot);                              // pick comparte el colado
@@ -648,8 +719,8 @@ static void pintaTodo() {
             long w = extW(c), h = extH(c);
             long long* c4 = cacheRow(c, w, h);
             long vis = ccG(c, CI_FLG) & 1;
-            int ax = (int)(ccG(c, CI_X) - 3 * QZ) / QZ;
-            int ay = (int)(ccG(c, CI_Y) - 3 * QZ) / QZ;
+            int ax = (int)(ccG(c, CI_X) - gCamX - 3 * QZ) / QZ;
+            int ay = (int)(ccG(c, CI_Y) - gCamY - 3 * QZ) / QZ;
             long gv = gvUp(c);
             limpia(ax, ay, w, h);                 // zona -> fondo
             if (!vis) { c4[3] = -1; continue; }
@@ -665,25 +736,39 @@ static void pintaTodo() {
         }
     }
     gImgGen = gGen;
+    gCamVisto = gCamVer;
 }
 
-// ---- [K] pick con el mismo orden de colado ----------------------------------
-static Ser* elige(float mx, float my) {
-    for (long i = gLinN - 1; i >= 0; i--) {
-        Ser* s = gLin[i];
-        Ser* f = s->fol;
-        float ox = 0, oy = 0;
-        for (Ser* p = f; p; p = p->fol) {
-            ox += (float)ccG(p, CI_X) / QZ;
-            oy += (float)ccG(p, CI_Y) / QZ;
-        }
-        float x = ox + (float)ccG(s, CI_X) / QZ;
-        float y = oy + (float)ccG(s, CI_Y) / QZ;
-        float w = (float)ccG(s, CI_W) / QZ;
-        float h = (float)ccG(s, CI_H) / QZ;
-        if (mx >= x && my >= y && mx <= x + w && my <= y + h) return s;
+// ---- [K] pick por zonas anidables (mismo orden de colado) ------------------
+static Ser* eligeZ(Ser* s, float mx, float my) {  // mx,my: coords del fol de s
+    if (!s) return 0;
+    long fl = ccG(s, CI_FLG);
+    if (s->tc != 'r' && !(fl & 1)) return 0;
+    float x = 0, y = 0, w = 0, h = 0;
+    if (s->tc != 'r') {
+        x = (float)ccG(s, CI_X) / QZ;
+        y = (float)ccG(s, CI_Y) / QZ;
+        w = (float)ccG(s, CI_W) / QZ;
+        h = (float)ccG(s, CI_H) / QZ;
     }
-    return 0;
+    char en = (mx >= x && my >= y && mx <= x + w && my <= y + h);
+    if (s->tc != 'r' && !en
+        && (s->tc == 'p' || s->tc == 'q' || s->tc == 'c'))
+        return 0;                            // zona cancelante: corta la rama
+    Ser* hit = 0;
+    if (s->tc != 'p' || (ccG(s, CI_ABI) & 1))
+        for (long pase = 0; pase < 2; pase++)         // pin al final: mismo orden
+            for (long i = 0; i < s->nA; i++) {
+                Ser* hn = s->A[i];
+                if (!hn || (((ccG(hn, CI_FLG) & 8) != 0) != (pase == 1))) continue;
+                Ser* r2 = eligeZ(hn, mx - x, my - y);
+                if (r2) hit = r2;             // los ultimos pintados ganan
+            }
+    if (!hit && s->tc != 'r' && en) hit = s;
+    return hit;
+}
+static Ser* elige(float mx, float my) {       // pantalla -> mundo con la camara
+    return eligeZ(gRoot, mx + (float)gCamX / QZ, my + (float)gCamY / QZ);
 }
 static void mandaAlFrente(Ser* s) {
     Ser* f = s->fol;
@@ -707,7 +792,9 @@ static void escritor() {
                 long cond = o->r[2];
                 long op = o->r[3];
                 if (op == 3) {                   // mover x/y con guardia de golpes
+                    lgE(t, CI_X, ccG(t, CI_X), 0);
                     ccS(t, CI_X, o->r[1]);
+                    lgE(t, CI_Y, ccG(t, CI_Y), 0);
                     ccS(t, CI_Y, o->r[2]);
                     zapFol(t);
                     for (int n = 0; n < 4 && pisaHermano(t); n++) {
@@ -717,6 +804,7 @@ static void escritor() {
                 } else {
                     long ci = o->r[0], v = o->r[1];
                     long act = ccG(t, ci);
+                    lgE(t, ci, act, 0);
                     if (cond == 1) { if (act < v) ccS(t, ci, op); }
                     else if (cond == 2) { if (act > v) ccS(t, ci, op); }
                     else if (cond == 3) { if (act == v) ccS(t, ci, op); }
@@ -814,6 +902,10 @@ static void escritor() {
                 c4[3]++;
                 o->t->vr++; gGen++;
             }
+        } else if (o->k == 8) {                  // camara global: mueve la vista
+            gCamX += o->r[0];
+            gCamY += o->r[1];
+            gCamVer++;
         }
         oTail = oTail + 1;
     }
@@ -829,8 +921,13 @@ static void inspAplica(Ser* sl) {        // slider del inspector -> objetivo
     if (!gObj || !sl || sl->fol != gInsp) return;
     long ch = ccG(sl, CI_EXT);
     long vr = ccG(sl, CI_VAL);
-    if (ch == CI_RED) ccS(gObj, CI_RED, vr * 30 / 1000);
-    else if (ch >= CI_R && ch <= CI_B) ccS(gObj, ch, vr * QZ / 1000);
+    if (ch == CI_RED) {
+        lgE(gObj, CI_RED, ccG(gObj, CI_RED), 0);
+        ccS(gObj, CI_RED, vr * 30 / 1000);
+    } else if (ch >= CI_R && ch <= CI_B) {
+        lgE(gObj, ch, ccG(gObj, ch), 0);
+        ccS(gObj, ch, vr * QZ / 1000);
+    }
 }
 
 static void syncInsp() {                 // inspector refleja al objetivo
@@ -853,6 +950,7 @@ static void syncInsp() {                 // inspector refleja al objetivo
 static __attribute__((unused)) void pisaRaton(float mx, float my) {
     Ser* s = elige(mx, my);
     if (!s) return;
+    lgEmp();                                 // un clic = un grupo de deshacer
     gAnt = gSel;
     gSel = s;
     long enI = 0;
@@ -889,15 +987,25 @@ static __attribute__((unused)) void pisaRaton(float mx, float my) {
         gDOffY = my - oy - (float)ccG(s, CI_Y) / QZ;
     }
     if (s->tc == 'b') ccS(s, CI_EXT, 1);
-    if (s->tc == 'k') ccS(s, CI_FLG, ccG(s, CI_FLG) ^ 2);
-    if (s == gInspVis && gObj)             // inspector escribe al objetivo
+    if (s->tc == 'k') {
+        lgE(s, CI_FLG, ccG(s, CI_FLG), 0);
+        ccS(s, CI_FLG, ccG(s, CI_FLG) ^ 2);
+    }
+    if (s == gInspVis && gObj) {           // inspector escribe al objetivo
+        lgE(gObj, CI_FLG, ccG(gObj, CI_FLG), 0);
         ccS(gObj, CI_FLG, (ccG(s, CI_FLG) & 2) ? (ccG(gObj, CI_FLG) | 1)
                                                : (ccG(gObj, CI_FLG) & ~1));
-    if (s == gInspPn && gObj)
+    }
+    if (s == gInspPn && gObj) {
+        lgE(gObj, CI_FLG, ccG(gObj, CI_FLG), 0);
         ccS(gObj, CI_FLG, (ccG(s, CI_FLG) & 2) ? (ccG(gObj, CI_FLG) | 8)
                                                : (ccG(gObj, CI_FLG) & ~8));
+    }
     if (s == gInspEd) gEdito = (ccG(s, CI_FLG) & 2) ? 1 : 0;
-    if (s->tc == 'p') ccS(s, CI_ABI, ccG(s, CI_ABI) ^ 1);
+    if (s->tc == 'p') {
+        lgE(s, CI_ABI, ccG(s, CI_ABI), 0);
+        ccS(s, CI_ABI, ccG(s, CI_ABI) ^ 1);
+    }
     if (s->tc == 'e') {
         long v = ccG(s, CI_VAL);
         Ser* obj = (gAnt && gAnt->tc != 'e' && gAnt->tc != 'r') ? gAnt : 0;
@@ -914,10 +1022,15 @@ static __attribute__((unused)) void sueltoRaton() { gArra = 0; gSlid = 0; }
 static __attribute__((unused)) void tecla(char k) {
     if (k == 0) return;
     if (gEdito && gObj) {                    // edicion de etiqueta
+        lgEmp();                             // tecla = grupo propio
         long n = 0; if (gObj->lb) while (gObj->lb[n]) n++;
-        if (k == 8 && n > 0) { gObj->lb[n - 1] = 0; gObj->vr++; gGen++; }
+        if (k == 8 && n > 0) {
+            lgE(gObj, -2, 0, gObj->lb ? xSt(gObj->lb) : 0);
+            gObj->lb[n - 1] = 0; gObj->vr++; gGen++;
+        }
         else if (k >= 32 && k < 127 && n < 60) {
             if (k >= 'a' && k <= 'z') k = (char)(k - 32);   // glifos 3x5
+            lgE(gObj, -2, 0, gObj->lb ? xSt(gObj->lb) : 0);
             char* nv = (char*)xM((unsigned long)(n + 2));
             for (long i = 0; i <= n; i++) nv[i] = gObj->lb[i];
             xMe(gObj->lb);
@@ -932,9 +1045,13 @@ static __attribute__((unused)) void tecla(char k) {
         if (gInspEd && gEdito == ((ccG(gInspEd, CI_FLG) & 2) ? 0 : 1))
             ccS(gInspEd, CI_FLG, ccG(gInspEd, CI_FLG) ^ 2);
     }
+    if (k == 'U') { deshacer(); return; }          // deshacer: ultimo grupo
+    if (k == 'C') ordP(8, 0, -gCamX, -gCamY, 0, 0, 0, 0);   // camara a origen
+    lgEmp();                                 // una tecla = un grupo
     if (gObj) {
-        if (k == 'V') ccS(gObj, CI_FLG, ccG(gObj, CI_FLG) ^ 1);
-        if (k == 'P') ccS(gObj, CI_FLG, ccG(gObj, CI_FLG) ^ 8);
+        long flO = ccG(gObj, CI_FLG);
+        if (k == 'V') { lgE(gObj, CI_FLG, flO, 0); ccS(gObj, CI_FLG, flO ^ 1); }
+        if (k == 'P') { lgE(gObj, CI_FLG, flO, 0); ccS(gObj, CI_FLG, flO ^ 8); }
         if (k == 'F') ordP(3, gObj, 0, 0, 0, 0, 0, 0);
         if (k == 'B') ordP(7, gObj, 0, 0, 0, 0, 0, 0);
         if (k == 'Z') ordP(7, gObj, 1, 0, 0, 0, 0, 0);
@@ -1393,6 +1510,73 @@ static void pruebas() {
            e1->lb && e1->lb[0] == 'Q' && e1->lb[1] == 0 ? "PASA" : "FALLA",
            e1->lb ? e1->lb : "-");
     gEdito = 0;
+    deshacer();                              // repone el borrado: lb = "QW"
+    printf("deshacer borrado de etiqueta: %s (lb=%s)\n",
+           e1->lb && e1->lb[1] == 'W' ? "PASA" : "FALLA",
+           e1->lb ? e1->lb : "-");
+    deshacer();                              // repone el append W: lb = "Q"
+    printf("deshacer tecla de etiqueta: %s (lb=%s)\n",
+           e1->lb && e1->lb[0] == 'Q' && e1->lb[1] == 0 ? "PASA" : "FALLA",
+           e1->lb ? e1->lb : "-");
+    Ser* fu = serCr(gRoot, 'l', "fU", "fTx");     // parser de filas desde texto
+    long nf = fTx(fu, "1 0 0 0 3 4.25\n0.5 1 0 1 3 2");
+    double* fuf = (double*)fu->M[0];
+    printf("parser f6 desde texto: %s (%ld filas, arg=%g)\n",
+           (nf == 2 && fu->nM == 2 && fuf && fuf[0] == 1 && fuf[5] == 4.25)
+           ? "PASA" : "FALLA", nf, fuf ? fuf[5] : -1.0);
+    double* fu2 = fu->nM > 1 ? (double*)fu->M[1] : 0;
+    printf("parser cond fraccionaria: %s (%g)\n",
+           fu2 && fu2[0] == 0.5 ? "PASA" : "FALLA", fu2 ? fu2[0] : -1.0);
+    long nn = fTx(fu, "3 0 0 255 0 0 0 1 1");      // 9 tokens: contador n9
+    printf("parser n9 desde texto: %s (TM=%c)\n",
+           (nn == 1 && fu->nM == 3 && fu->TM[2] && fu->TM[2][1] == '9')
+           ? "PASA" : "FALLA", fu->TM[2] ? fu->TM[2][1] : '?');
+    Ser* pz = serCr(gRoot, 'p', "pZ", "Zona");    // pick por zonas anidables
+    ccS(pz, CI_X, 500 * QZ); ccS(pz, CI_Y, 440 * QZ);
+    ccS(pz, CI_W, 60 * QZ); ccS(pz, CI_H, 30 * QZ);
+    ccS(pz, CI_R, 0.1f * QZ); ccS(pz, CI_G, 0.2f * QZ); ccS(pz, CI_B, 0.3f * QZ);
+    ccS(pz, CI_FLG, 1); ccS(pz, CI_A, QZ); ccS(pz, CI_RED, 6);
+    ccS(pz, CI_ABI, 1);
+    Ser* cz = serCr(pz, 'b', "bZ", "bZ");
+    ccS(cz, CI_X, 10 * QZ); ccS(cz, CI_Y, 10 * QZ);
+    ccS(cz, CI_W, 20 * QZ); ccS(cz, CI_H, 10 * QZ);
+    ccS(cz, CI_FLG, 1); ccS(cz, CI_A, QZ); ccS(cz, CI_RED, 6);
+    ccS(cz, CI_R, 0.2f * QZ); ccS(cz, CI_G, 0.5f * QZ); ccS(cz, CI_B, 0.9f * QZ);
+    pintaTodo();
+    printf("pick dentro de zona: %s\n", elige(515, 455) == cz ? "PASA" : "FALLA");
+    ccS(cz, CI_X, 70 * QZ);                      // hijo fuera del panel
+    printf("pick fuera de zona cancela rama: %s\n",
+           elige(575, 455) != cz ? "PASA" : "FALLA");
+    ccS(cz, CI_X, 10 * QZ);                      // de vuelta: dentro de zona
+    ordP(8, 0, 100 * QZ, 0, 0, 0, 0, 0);         // camara global +100 px
+    escritor(); pintaTodo();
+    unsigned int cvG = gImg[455 * gW + 415];
+    printf("camara global mueve la imagen: %s (B=%ld)\n",
+           ((cvG & 255) > 90 && ((cvG >> 8) & 255) > 90) ? "PASA" : "FALLA",
+           (long)(cvG & 255));
+    printf("camara global mueve el pick: %s\n",
+           elige(415, 455) == cz ? "PASA" : "FALLA");
+    ordP(8, 0, -100 * QZ, 0, 0, 0, 0, 0);        // camara a origen
+    escritor(); pintaTodo();
+    Ser* uk = (gRoot->nA > 0 && gRoot->A[0] && gRoot->A[0]->nA > 1)
+              ? gRoot->A[0]->A[1] : 0;                    // check Mundo
+    if (uk && uk->tc == 'k') {
+        long fl0 = ccG(uk, CI_FLG);
+        pisaRaton(40, 80);                       // clic real: grupo de deshacer
+        long fl1 = ccG(uk, CI_FLG);
+        deshacer();
+        printf("deshacer clic en check: %s (%ld -> %ld)\n",
+               (fl1 != fl0 && ccG(uk, CI_FLG) == fl0) ? "PASA" : "FALLA",
+               fl0, ccG(uk, CI_FLG));
+        long va0 = ccG(uk, CI_VAL);
+        lgEmp();
+        ordP(0, uk, (long)CI_VAL, 0, 0, 700, 0, 0); escritor();
+        long va1 = ccG(uk, CI_VAL);
+        deshacer();
+        printf("deshacer asignacion: %s (%ld -> %ld -> %ld)\n",
+               (va1 == 700 && ccG(uk, CI_VAL) == va0) ? "PASA" : "FALLA",
+               va0, va1, ccG(uk, CI_VAL));
+    }
     ordP(4, 0, 0, 0, 0, 0, 0, 0);           // re-volcado con pin y camara
     escritor();
     printf("seres sin fuga en serccion: %s\n", guardado ? "PASA" : "FALLA");
@@ -1496,7 +1680,12 @@ static LRESULT CALLBACK wnProc(HWND v, UINT m, WPARAM w, LPARAM l) {
     case WM_KEYDOWN:
         if (w == VK_ESCAPE) DestroyWindow(gVen);
         if (w == VK_DELETE && gSel) { ordP(2, gSel, 0,0,0,0,0,0); escritor(); }
+        if (w == VK_LEFT)  ordP(8, 0, -32 * QZ, 0, 0, 0, 0, 0);
+        if (w == VK_RIGHT) ordP(8, 0,  32 * QZ, 0, 0, 0, 0, 0);
+        if (w == VK_UP)    ordP(8, 0, 0, -32 * QZ, 0, 0, 0);
+        if (w == VK_DOWN)  ordP(8, 0, 0,  32 * QZ, 0, 0, 0);
         tecla((char)w);
+        escritor();
         return 0;
     }
     return DefWindowProcA(v, m, w, l);
