@@ -5,7 +5,7 @@ siendo **condición y asignación**. Sin structs especializados, sin enums, sin
 hardcodeo: cada nodo guarda su estado en matrices dinámicas `M[]` dirigidas por
 descriptores `TM[]`, en punto fijo (`QZ = 256`).
 
-Un único archivo: `src/Ser.cpp` (~1040 líneas), compilable en Windows x64
+Un único archivo: `src/Ser.cpp`, compilable en Windows x64
 (MinGW64 / GCC 9.2, Dev-C++ o Makefile.win).
 
 ## Estructura del repo
@@ -65,6 +65,18 @@ grupo completo en reversa. Borrar y reordenar en z no se reponen
 (quedan para filas SM). Sin lugar en el anillo de 128 entradas el
 fondo se pierde (aviso implicito), nunca corrompe.
 
+## Hilos por pares (par vigilante, impar obrero)
+
+Dos hilos, cero mutex: **par** = vigilante (`alVigilante`) que duerme 16 ms,
+hace avanzar el tic cronologico `gTic` y genera el frame de la fuente de
+camara en `gBufCam`; **impar** = la ventana misma (escritor + pintado). El
+pase de dato es un embudo interlocked: `__sync_lock_test_and_set(&gCamNva, 0)`
+avisa "hay frame nuevo" sin carrera, y el escritor `k==6` usa un **seqlock**
+contra `gCamF` (hasta 4 reintentos) para nunca leer un frame a medio armar.
+En Win son `CreateThread`/`CloseHandle`; en POSIX, `pthread_create`/`pthread_join`.
+Validado por pruebas headless: "hilo par tic cronologico" e "hilo par alimenta
+la camara".
+
 ## Camara global
 
 `gCamX`/`gCamY` volatiles: **pantalla = mundo - camara**. El escritor
@@ -93,7 +105,7 @@ En Dev-C++ (Proyecto Win32 GUI, C++11) o Makefile.win → target `Ser.o` +
 enlazado con `-luser32 -lgdi32`. Con ventana abre un editor de controles:
 botones, checks, sliders, redondeados, caches, sesiones anidadas.
 
-Sin modificar nada, `main()` corre primero la batería de pruebas (11/11 PASA,
+Sin modificar nada, `main()` corre primero la batería de pruebas (39/39 PASA,
 sin ventana) y escribe `ser_check.ppm` 800x520 como render de verificación.
 
 ## Formato

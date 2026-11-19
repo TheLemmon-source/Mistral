@@ -24,6 +24,9 @@
 //             escritor mueve la camara, C la vuelve al origen.
 //  pick Z   : pick recursivo por zonas anidables: panel/sesion/cubo que no
 //             contiene al punto cancela su sub-arbol (no recorre todo).
+//  hilos    : par = vigilante (tic cronologico + fuente de camara); impar =
+//             escritor + pintado (ventana). Embudo interlocked gCamNva y
+//             seqlock gCamF en k==6: el impar nunca lee frame a medio armar.
 //  guardia  : asignaciones de x/y se recortan al fol y esquivan hermanos.
 //  oroga.dbg: N = nodo, V = fila SM; carga si existe y guarda el arbol vivo.
 // ============================================================================
@@ -554,6 +557,60 @@ static long long* camRow(Ser* s, long w, long h) {   // crea/ajusta fila 'x'
     return c4;
 }
 
+// ---- [H] hilos por pares: par = vigilante, impar = escritor (interlocked) ---
+static volatile long gTic = 0;          // tic cronologico del vigilante (par)
+static volatile long gCamNva = 0;       // embudo: hay frame nuevo para el impar
+static volatile long gParar = 0;        // apaga los hilos (fin de sesion)
+#if defined(_WIN32)
+#include <windows.h>
+static void dormir(long ms) { Sleep(ms); }
+#else
+#include <unistd.h>
+#include <pthread.h>
+static void dormir(long ms) { usleep((useconds_t)ms * 1000); }
+#endif
+static void camFuente() {               // el par genera el marco sintetico
+    if (!gCamNodo) return;
+    for (long j = 0; j < 24; j++)
+        for (long i = 0; i < 32; i++) {
+            long rr = (i * 8 + gCamF) & 255;
+            long gg = (j * 10 + gCamF * 2) & 255;
+            gBufCam[j * 32 + i] = pr((float)rr / 255.0f,
+                (float)gg / 255.0f, 0.6f, 1.0f);
+        }
+    gCamF += 3;
+    __sync_lock_test_and_set(&gCamNva, 1);   // interlocked: hay frame nuevo
+}
+#if defined(_WIN32)
+static DWORD __stdcall alVigilante(void* p) {
+    (void)p;
+    while (!gParar) {
+        dormir(16);
+        __sync_fetch_and_add(&gTic, 1);
+        camFuente();
+    }
+    return 0;
+}
+static void parArranca() {
+    HANDLE h = CreateThread(0, 0, alVigilante, 0, 0, 0);
+    if (h) CloseHandle(h);
+}
+static void parParar() { gParar = 1; }
+#else
+static pthread_t gHiloVig;
+static void* alVigilante(void* p) {
+    (void)p;
+    while (!gParar) {
+        dormir(16);
+        __sync_fetch_and_add(&gTic, 1);
+        camFuente();
+    }
+    return 0;
+}
+static void parArranca() { pthread_create(&gHiloVig, 0, alVigilante, 0); }
+static void parParar() { gParar = 1; pthread_join(gHiloVig, 0); }
+#endif
+
 // ---- [P] pintado del arbol (colado por orden A[], cache por gen) ------------
 static Ser* gLin[1024];    // lista colada pintador (mismo orden sirve al pick)
 static long gLinN = 0;
@@ -897,8 +954,12 @@ static void escritor() {
         } else if (o->k == 6) {                  // alimenta camara 'm'
             if (o->t && o->tx && o->r[0] > 0 && o->r[1] > 0) {
                 long long* c4 = camRow(o->t, o->r[0], o->r[1]);
-                memcpy((void*)c4[0], o->tx,
-                       (size_t)(o->r[0] * o->r[1]) * sizeof(unsigned int));
+                for (long vi = 0; vi < 4; vi++) {    // embudo: sin leer sucio
+                    long fv = gCamF;
+                    memcpy((void*)c4[0], o->tx,
+                           (size_t)(o->r[0] * o->r[1]) * sizeof(unsigned int));
+                    if (gCamF == fv) break;      // el par no escribio mientras
+                }
                 c4[3]++;
                 o->t->vr++; gGen++;
             }
@@ -1558,6 +1619,24 @@ static void pruebas() {
            elige(415, 455) == cz ? "PASA" : "FALLA");
     ordP(8, 0, -100 * QZ, 0, 0, 0, 0, 0);        // camara a origen
     escritor(); pintaTodo();
+    parArranca();                          // par: tic cronologico + fuente cam
+    long t0 = gTic;
+    dormir(120);                                 // el par avanza solo
+    printf("hilo par tic cronologico: %s (%ld -> %ld)\n",
+           gTic > t0 ? "PASA" : "FALLA", t0, gTic);
+    long long* cx = camFil(gCamNodo);
+    long v0x = cx ? (long)cx[3] : 0;
+    for (long vu = 0; vu < 8 && !(cx && (long)cx[3] > v0x); vu++) {
+        long nvo = __sync_lock_test_and_set(&gCamNva, 0);
+        if (nvo) ordFeed(gCamNodo, gBufCam, 32, 24);   // rol del impar (WinMain)
+        else dormir(25);
+        while (oTail != oHead) escritor();       // volcado impar: ejecuta k=6
+        cx = camFil(gCamNodo);
+    }
+    printf("hilo par alimenta la camara: %s (ver %ld -> %ld)\n",
+           (cx && (long)cx[3] > v0x) ? "PASA" : "FALLA",
+           v0x, cx ? (long)cx[3] : -1);
+    parParar();                            // apaga el hilo: sesiones limpias
     Ser* uk = (gRoot->nA > 0 && gRoot->A[0] && gRoot->A[0]->nA > 1)
               ? gRoot->A[0]->A[1] : 0;                    // check Mundo
     if (uk && uk->tc == 'k') {
@@ -1682,8 +1761,8 @@ static LRESULT CALLBACK wnProc(HWND v, UINT m, WPARAM w, LPARAM l) {
         if (w == VK_DELETE && gSel) { ordP(2, gSel, 0,0,0,0,0,0); escritor(); }
         if (w == VK_LEFT)  ordP(8, 0, -32 * QZ, 0, 0, 0, 0, 0);
         if (w == VK_RIGHT) ordP(8, 0,  32 * QZ, 0, 0, 0, 0, 0);
-        if (w == VK_UP)    ordP(8, 0, 0, -32 * QZ, 0, 0, 0);
-        if (w == VK_DOWN)  ordP(8, 0, 0,  32 * QZ, 0, 0, 0);
+        if (w == VK_UP)    ordP(8, 0, 0, -32 * QZ, 0, 0, 0, 0);
+        if (w == VK_DOWN)  ordP(8, 0, 0,  32 * QZ, 0, 0, 0, 0);
         tecla((char)w);
         escritor();
         return 0;
@@ -1712,6 +1791,7 @@ int PASCAL WinMain(HINSTANCE i, HINSTANCE p, LPSTR c, int s) {
     ShowWindow(gVen, 1);
     gImg = (unsigned int*)xM((unsigned long)(gW * gH) * sizeof(unsigned int));
     if (!desEscena(gRuta)) escModelo();
+    parArranca();                        // par vigilante: tic + fuente de camara
     BITMAPINFO bi;
     ZeroMemory(&bi, sizeof(bi));
     bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
@@ -1726,17 +1806,8 @@ int PASCAL WinMain(HINSTANCE i, HINSTANCE p, LPSTR c, int s) {
             if (m.message == WM_QUIT) return 0;
             TranslateMessage(&m); DispatchMessageA(&m);
         }
-        if (gCamNodo) {                      // fuente sintetica (camara viva)
-            for (long j = 0; j < 24; j++)
-                for (long i = 0; i < 32; i++) {
-                    long rr = (i * 8 + gCamF) & 255;
-                    long gg = (j * 10 + gCamF * 2) & 255;
-                    gBufCam[j * 32 + i] = pr((float)rr / 255.0f,
-                        (float)gg / 255.0f, 0.6f, 1.0f);
-                }
-            gCamF += 3;
-            ordFeed(gCamNodo, gBufCam, 32, 24);
-        }
+        if (gCamNodo && __sync_lock_test_and_set(&gCamNva, 0))
+            ordFeed(gCamNodo, gBufCam, 32, 24);   // embudo: el par aviso frame
         escritor();
         tickN9(gRoot);                       // contadores vivos por cuadro
         pintaTodo();
