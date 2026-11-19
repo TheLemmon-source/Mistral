@@ -79,11 +79,27 @@ la camara".
 
 ## Camara global
 
-`gCamX`/`gCamY` volatiles: **pantalla = mundo - camara**. El escritor
+`gCamX`/`gCamY` volatiles: **pantalla = mundo - camara** (solo ramas sin
+pin: los fijados viven en pantalla). El escritor
 la mueve con op `8` (`ordP(8, 0, dx, dy, 0,0,0,0)`); flechas del teclado
 la desplazan a pasos de 32 px y `C` la vuelve al origen. El render
 reubica cada cache de raiz con la camara; el pick convierte
 pantalla -> mundo antes de bajar por zonas.
+
+## Barra de Ayuda y foco visible
+
+La escena de arranque trae una barra **fijada** (pin) al pie: una línea
+clava los atajos (FLECHAS cámara, C origen, U deshacer, L etiqueta,
+V visible, P pin, D borrar, F/B/Z/X orden z) y una línea de estado
+se reescribe por frame con el foco real: `SEL nombre [tipo]` + marcas
+`OCULTO`/`PIN` (sin repintar si no cambia: solo sube versión al
+cambiar el texto). El nodo con foco (`gObj`) lleva **marco ámbar de
+2 px** además del borde blanco de selección.
+
+Además la cámara ya no arrastra la UI fijada: los hijos tope de la
+raíz con pin se pintan y se pícan en **espacio de pantalla** (la
+cámara se aplica por hijo según su pin), y el arrastre/slider
+convierte el ratón a mundo con `ratonMundo` solo cuando corresponde.
 
 ## Filas desde texto (fTx)
 
@@ -105,7 +121,7 @@ En Dev-C++ (Proyecto Win32 GUI, C++11) o Makefile.win → target `Ser.o` +
 enlazado con `-luser32 -lgdi32`. Con ventana abre un editor de controles:
 botones, checks, sliders, redondeados, caches, sesiones anidadas.
 
-Sin modificar nada, `main()` corre primero la batería de pruebas (39/39 PASA,
+Sin modificar nada, `main()` corre primero la batería de pruebas (42/42 PASA,
 sin ventana) y escribe `ser_check.ppm` 800x520 como render de verificación.
 
 ## Formato
@@ -143,9 +159,11 @@ sin ventana) y escribe `ser_check.ppm` 800x520 como render de verificación.
   al cerrar la ventana (`WM_DESTROY`) se volca `oroga.dbg` con la
   sesion completa. Recortes con aviso en stderr: arbol > 1024 nodos,
   colado > 1024, cola `oRing` llena (la orden se pierde, no corrompe).
-- Ventana: sin resize ni maximizar (el buffer `gImg` es fijo `gW x gH`,
-  recrearlo quedo para cuando haya camara global). Minimizar/restaurar
-  repinta bien (tamanio constante).
+- Ventana: **resize y maximizar permitidos** — `WM_SIZE` recrea `gImg`
+  con el tamaño nuevo, llena el fondo, invalida el frame completo y
+  actualiza `gRoot` (el encabezado `BITMAPINFO` se refresca por frame).
+  Los paneles fijados (pin) quedan donde están: viven en espacio de
+  pantalla, no en mundo.
 
 ## Notas LLP64 (Windows x64)
 

@@ -12,7 +12,11 @@
 //             op 5=crb: crea rama hija de tipo (char)dst bajo el nodo script;
 //             arg = tope de hijos (nA < arg) => cascada sin duplicados.
 //  pin      : CI_FLG bit 8: primer plano (colado/pick al final) e inamovible
-//             (sin mandaAlFrente, sin arrastre; slider sigue dando valor).
+//             (sin mandaAlFrente, sin arrastre; slider sigue dando valor);
+//             vive en espacio de PANTALLA: la camara no lo arrastra.
+//  ayuda    : barra fijada al pie: atajos a la vista + linea SEL con el foco
+//             vivo; el nodo con foco lleva marco ambar de 2 px.
+//  ventana  : resize/maximizar ok: WM_SIZE recrea gImg y repinta todo.
 //  camara   : nodo 'm' con fila TM 'x' [img,w,h,ver]; ordFeed (k=6) la carga;
 //             sin fuente pinta CAM. Bezel Cam fijado contiene la camara.
 //  escritor : unico (par obrero en Win; sicrono en pruebas). La GUI encola.
@@ -369,6 +373,7 @@ static Ser* gInspVis = 0;               // check visible
 static Ser* gInspPn = 0;                // check pin
 static Ser* gInspR = 0; static Ser* gInspG = 0;
 static Ser* gInspB = 0; static Ser* gInspRad = 0;
+static Ser* gAyTxt = 0;                 // estado vivo: foco + teclado
 static long gEdito = 0;                 // escribiendo etiqueta del objetivo
 static volatile long gCamX = 0, gCamY = 0;  // camara global: pantalla = mundo - cam
 static volatile long gCamVer = 0;       // version de camara: invalida el volcado
@@ -671,11 +676,12 @@ static void pintaNodo(Ser* s, float ox, float oy) {
                pr(r * 1.35f, g * 1.35f, b * 1.35f, a > 0.5f ? 1 : a), red);
         texto(x + 4, y + 3, s->lb, pr(1, 1, 1, 1));
     }
-    if (s->tc != 'r' && ccG(s, CI_SEL)) {
-        rectoQ(x - 1, y - 1, w + 2, 1, pr(1, 1, 1, 1), 0);
-        rectoQ(x - 1, y + h, w + 2, 1, pr(1, 1, 1, 1), 0);
-        rectoQ(x - 1, y - 1, 1, h + 2, pr(1, 1, 1, 1), 0);
-        rectoQ(x + w, y - 1, 1, h + 2, pr(1, 1, 1, 1), 0);
+    if (s->tc != 'r' && ccG(s, CI_SEL)) {   // foco: marco ambar de 2 px
+        unsigned int ac = pr(1, 0.75f, 0.15f, 1);
+        rectoQ(x - 2, y - 2, w + 4, 2, ac, 0);
+        rectoQ(x - 2, y + h, w + 4, 2, ac, 0);
+        rectoQ(x - 2, y, 2, h, ac, 0);
+        rectoQ(x + w, y, 2, h, ac, 0);
     }
     if (s->tc != 'p' || (ccG(s, CI_ABI) & 1)) {   // cascada: despliegue
         for (long pase = 0; pase < 2; pase++)     // pin CI_FLG&8 al final
@@ -776,8 +782,9 @@ static void pintaTodo() {
             long w = extW(c), h = extH(c);
             long long* c4 = cacheRow(c, w, h);
             long vis = ccG(c, CI_FLG) & 1;
-            int ax = (int)(ccG(c, CI_X) - gCamX - 3 * QZ) / QZ;
-            int ay = (int)(ccG(c, CI_Y) - gCamY - 3 * QZ) / QZ;
+            long pin = ccG(c, CI_FLG) & 8;
+            int ax = (int)(ccG(c, CI_X) - (pin ? 0 : gCamX) - 3 * QZ) / QZ;
+            int ay = (int)(ccG(c, CI_Y) - (pin ? 0 : gCamY) - 3 * QZ) / QZ;
             long gv = gvUp(c);
             limpia(ax, ay, w, h);                 // zona -> fondo
             if (!vis) { c4[3] = -1; continue; }
@@ -818,14 +825,28 @@ static Ser* eligeZ(Ser* s, float mx, float my) {  // mx,my: coords del fol de s
             for (long i = 0; i < s->nA; i++) {
                 Ser* hn = s->A[i];
                 if (!hn || (((ccG(hn, CI_FLG) & 8) != 0) != (pase == 1))) continue;
-                Ser* r2 = eligeZ(hn, mx - x, my - y);
+                float cmx = 0, cmy = 0;
+                if (s == gRoot && !(ccG(hn, CI_FLG) & 8)) {
+                    cmx = (float)gCamX / QZ;
+                    cmy = (float)gCamY / QZ;          // pin: espacio de pantalla
+                }
+                Ser* r2 = eligeZ(hn, mx - x + cmx, my - y + cmy);
                 if (r2) hit = r2;             // los ultimos pintados ganan
             }
     if (!hit && s->tc != 'r' && en) hit = s;
     return hit;
 }
-static Ser* elige(float mx, float my) {       // pantalla -> mundo con la camara
-    return eligeZ(gRoot, mx + (float)gCamX / QZ, my + (float)gCamY / QZ);
+static Ser* elige(float mx, float my) {       // camara por hijo: pin fijo
+    return eligeZ(gRoot, mx, my);
+}
+static void ratonMundo(Ser* s, float mx, float my, float* ox, float* oy) {
+    if (ox) *ox = mx;
+    if (oy) *oy = my;
+    Ser* r = s;
+    while (r && r->fol && r->fol != gRoot) r = r->fol;   // hijo tope de la rama
+    if (!r || (r->fol == gRoot && (ccG(r, CI_FLG) & 8))) return;   // pin: pantalla
+    if (ox) *ox = mx + (float)gCamX / QZ;
+    if (oy) *oy = my + (float)gCamY / QZ;
 }
 static void mandaAlFrente(Ser* s) {
     Ser* f = s->fol;
@@ -991,6 +1012,18 @@ static void inspAplica(Ser* sl) {        // slider del inspector -> objetivo
     }
 }
 
+static void syncAyuda() {                // barra fija: foco y teclado vistos
+    if (!gAyTxt || !gAyTxt->lb || (gEdito && gObj == gAyTxt)) return;
+    static char sc[192];
+    char* nom = (gObj && gObj->lb && gObj->lb[0]) ? gObj->lb : (char*)"-";
+    snprintf(sc, sizeof(sc), "SEL %s [%c]%s%s",
+        nom, gObj ? gObj->tc : '?',
+        (gObj && !(ccG(gObj, CI_FLG) & 1)) ? " OCULTO" : "",
+        (gObj && (ccG(gObj, CI_FLG) & 8)) ? " PIN" : "");
+    if (strcmp(sc, gAyTxt->lb) == 0) return;
+    snprintf(gAyTxt->lb, 195, "%s", sc);
+    gAyTxt->vr++; gGen++;
+}
 static void syncInsp() {                 // inspector refleja al objetivo
     if (!gObj || !gInsp) return;
     ccS(gObj, CI_SEL, 1);
@@ -1011,6 +1044,7 @@ static void syncInsp() {                 // inspector refleja al objetivo
 static __attribute__((unused)) void pisaRaton(float mx, float my) {
     Ser* s = elige(mx, my);
     if (!s) return;
+    ratonMundo(s, mx, my, &mx, &my);         // pin: pantalla / resto: mundo
     lgEmp();                                 // un clic = un grupo de deshacer
     gAnt = gSel;
     gSel = s;
@@ -1392,6 +1426,23 @@ static void escModelo() {                   // escena de arranque
     ccS(im, CI_X, 140 * QZ); ccS(im, CI_Y, 48 * QZ);
     ccS(im, CI_R, QZ); ccS(im, CI_G, QZ); ccS(im, CI_B, QZ); ccS(im, CI_A, QZ);
     ccS(im, CI_FLG, 1);
+    Ser* pA = serCr(gRoot, 'p', "pY", "Ayuda");   // barra fijada: teclado visto
+    ccS(pA, CI_X, 16 * QZ); ccS(pA, CI_Y, 486 * QZ);
+    ccS(pA, CI_W, 660 * QZ); ccS(pA, CI_H, 32 * QZ);
+    ccS(pA, CI_R, 0.1f * QZ); ccS(pA, CI_G, 0.13f * QZ); ccS(pA, CI_B, 0.18f * QZ);
+    ccS(pA, CI_A, QZ); ccS(pA, CI_FLG, 1 | 8); ccS(pA, CI_ABI, 1); ccS(pA, CI_RED, 6);
+    gAyTxt = serCr(pA, 'l', "yT", "");            // estado del foco (vivo)
+    xMe(gAyTxt->lb);
+    gAyTxt->lb = (char*)xM(200); gAyTxt->lb[0] = 0;
+    ccS(gAyTxt, CI_X, 6 * QZ); ccS(gAyTxt, CI_Y, 4 * QZ);
+    ccS(gAyTxt, CI_R, QZ); ccS(gAyTxt, CI_G, 0.75f * QZ); ccS(gAyTxt, CI_B, 0.15f * QZ);
+    ccS(gAyTxt, CI_A, QZ); ccS(gAyTxt, CI_FLG, 1);
+    Ser* ay2 = serCr(pA, 'l', "yK",
+        "FLEC:camara  C:camara 0  U:deshacer  L:etiqueta  V:visible  "
+        "P:pin  D:borrar  F/B/Z/X:orden z");
+    ccS(ay2, CI_X, 6 * QZ); ccS(ay2, CI_Y, 19 * QZ);
+    ccS(ay2, CI_R, 0.9f * QZ); ccS(ay2, CI_G, 0.9f * QZ); ccS(ay2, CI_B, 0.95f * QZ);
+    ccS(ay2, CI_A, QZ); ccS(ay2, CI_FLG, 1);
 }
 
 // ---- [T] pruebas (sin ventana) ------------------------------------------------
@@ -1490,6 +1541,12 @@ static void pruebas() {
     pisaRaton(20, 12);
     printf("pin inamovible sin frente: %s\n",
            (gArra == 0 && gRoot->A[gRoot->nA - 1] == nb) ? "PASA" : "FALLA");
+    syncAyuda();                             // barra de estado sigue al foco
+    printf("ayuda refleja foco: %s (lb=%s)\n",
+           (gAyTxt && gAyTxt->lb && strncmp(gAyTxt->lb, "SEL ", 4) == 0
+            && strstr(gAyTxt->lb, "PIN")) ? "PASA" : "FALLA",
+           gAyTxt && gAyTxt->lb ? gAyTxt->lb : "-");
+    gObj = 0; ccS(pk, CI_SEL, 0); syncAyuda();
     Ser* cam = serCr(gRoot, 'm', "cT", "Cam");   // camara de prueba (zona libre:
     ccS(cam, CI_X, 40 * QZ); ccS(cam, CI_Y, 460 * QZ);   // el inspector pin tapa)
     ccS(cam, CI_W, 40 * QZ); ccS(cam, CI_H, 20 * QZ);
@@ -1619,6 +1676,16 @@ static void pruebas() {
            elige(415, 455) == cz ? "PASA" : "FALLA");
     ordP(8, 0, -100 * QZ, 0, 0, 0, 0, 0);        // camara a origen
     escritor(); pintaTodo();
+    unsigned int pv = gImg[495 * gW + 40];       // panel Ayuda fijado
+    unsigned int dv = gImg[100 * gW + 100];      // panel Dmo: en el mundo
+    ordP(8, 0, 60 * QZ, 40 * QZ, 0, 0, 0, 0);
+    escritor(); pintaTodo();
+    printf("pin quieto con camara: %s\n",
+           gImg[495 * gW + 40] == pv ? "PASA" : "FALLA");
+    printf("no fijado sigue a camara: %s\n",
+           gImg[100 * gW + 100] != dv ? "PASA" : "FALLA");
+    ordP(8, 0, -60 * QZ, -40 * QZ, 0, 0, 0, 0);  // camara a origen de nuevo
+    escritor(); pintaTodo();
     parArranca();                          // par: tic cronologico + fuente cam
     long t0 = gTic;
     dormir(120);                                 // el par avanza solo
@@ -1682,6 +1749,9 @@ static void pruebas() {
         }
         serAl(gRoot); gRoot = 0;
         gSes = 0; gForm = 0; gCamNodo = 0; gSel = 0; gAnt = 0; gArra = 0;
+        gInsp = 0; gInspEd = 0; gInspVis = 0; gInspPn = 0;
+        gInspR = 0; gInspG = 0; gInspB = 0; gInspRad = 0;
+        gAyTxt = 0; gObj = 0;                        // sin nodos fantasma al recargar
         long rr = desEscena(gRuta);
         Ser* sld1 = (gRoot && gRoot->nA > 0 && gRoot->A[0]->nA > 2)
                     ? gRoot->A[0]->A[2] : 0;
@@ -1731,9 +1801,11 @@ static LRESULT CALLBACK wnProc(HWND v, UINT m, WPARAM w, LPARAM l) {
         if (gArra) {
             POINT p; p.x = (long)(short)(l & 65535);
             p.y = (long)(short)((l >> 16) & 65535);
+            float wx = 0, wy = 0;
+            ratonMundo(gSlid ? gSel : gArra, (float)p.x, (float)p.y, &wx, &wy);
             if (!gSlid) {
-                long nx = (long)((p.x - gDOffX) * QZ);
-                long ny = (long)((p.y - gDOffY) * QZ);
+                long nx = (long)((wx - gDOffX) * QZ);
+                long ny = (long)((wy - gDOffY) * QZ);
                 ordP(0, gArra, 1, nx, ny, 3, 0, 0);
                 escritor();
             } else if (gSel && gSel->tc == 's') {
@@ -1742,7 +1814,7 @@ static LRESULT CALLBACK wnProc(HWND v, UINT m, WPARAM w, LPARAM l) {
                 for (Ser* q = f; q; q = q->fol) ox += (float)ccG(q, CI_X) / QZ;
                 float x = ox + (float)ccG(gSel, CI_X) / QZ;
                 float wi = (float)ccG(gSel, CI_W) / QZ;
-                float fr = x > 0 ? ((float)p.x - x) / (wi > 0 ? wi : 1) : 0;
+                float fr = x > 0 ? (wx - x) / (wi > 0 ? wi : 1) : 0;
                 if (fr < 0) fr = 0;
                 if (fr > 1) fr = 1;
                 ccS(gSel, CI_VAL, (long)(fr * 1000));
@@ -1756,6 +1828,21 @@ static LRESULT CALLBACK wnProc(HWND v, UINT m, WPARAM w, LPARAM l) {
         SetCapture(gVen);
         return 0; }
     case WM_LBUTTONUP: ReleaseCapture(); sueltoRaton(); return 0;
+    case WM_SIZE: {                      // la ventana manda su tamano: rehacer
+        long nw = (long)(l & 65535), nh = (long)((l >> 16) & 65535);
+        if (nw > 40 && nh > 40 && (nw != gW || nh != gH) && gImg) {
+            xMe((void*)gImg);
+            gW = nw; gH = nh;
+            gImg = (unsigned int*)xM((unsigned long)(gW * gH) * sizeof(unsigned int));
+            unsigned int bgf = pr(0.07f, 0.08f, 0.1f, 1);
+            for (unsigned long i = 0; i < (unsigned long)(gW * gH); i++) gImg[i] = bgf;
+            gImgGen = -1;                // todo el frame se repinta
+            if (gRoot) {
+                ccS(gRoot, CI_W, gW * QZ);
+                ccS(gRoot, CI_H, gH * QZ);
+            }
+        }
+        return 0; }
     case WM_KEYDOWN:
         if (w == VK_ESCAPE) DestroyWindow(gVen);
         if (w == VK_DELETE && gSel) { ordP(2, gSel, 0,0,0,0,0,0); escritor(); }
@@ -1782,21 +1869,20 @@ int PASCAL WinMain(HINSTANCE i, HINSTANCE p, LPSTR c, int s) {
     w.lpszClassName = "ser";
     RegisterClassA(&w);
     RECT rc; rc.left = 0; rc.top = 0; rc.right = gW; rc.bottom = gH;
-    // gImg es fijo gW x gH: sin resize ni maximizar (buffer no se rehace)
-    long estilo = WS_OVERLAPPEDWINDOW & ~(WS_THICKFRAME | WS_MAXIMIZEBOX);
+    long estilo = WS_OVERLAPPEDWINDOW;   // maximizar/resize ok: WM_SIZE rehace
     AdjustWindowRect(&rc, (LONG)estilo, 0);
     gVen = CreateWindowExA(0, "ser", "ser", (DWORD)estilo,
                            60, 60, rc.right - rc.left, rc.bottom - rc.top, 0, 0, i, 0);
     gHdc = GetDC(gVen);
-    ShowWindow(gVen, 1);
     gImg = (unsigned int*)xM((unsigned long)(gW * gH) * sizeof(unsigned int));
+    unsigned int bgf = pr(0.07f, 0.08f, 0.1f, 1);
+    for (unsigned long i = 0; i < (unsigned long)(gW * gH); i++) gImg[i] = bgf;
+    ShowWindow(gVen, 1);                 // el WM_SIZE inicial no cambia nada
     if (!desEscena(gRuta)) escModelo();
     parArranca();                        // par vigilante: tic + fuente de camara
     BITMAPINFO bi;
     ZeroMemory(&bi, sizeof(bi));
     bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
-    bi.bmiHeader.biWidth = (long)gW;
-    bi.bmiHeader.biHeight = (long)-gH;
     bi.bmiHeader.biPlanes = 1;
     bi.bmiHeader.biBitCount = 32;
     bi.bmiHeader.biCompression = 0;
@@ -1810,7 +1896,10 @@ int PASCAL WinMain(HINSTANCE i, HINSTANCE p, LPSTR c, int s) {
             ordFeed(gCamNodo, gBufCam, 32, 24);   // embudo: el par aviso frame
         escritor();
         tickN9(gRoot);                       // contadores vivos por cuadro
+        syncAyuda();                         // barra fija sigue al foco
         pintaTodo();
+        bi.bmiHeader.biWidth = (long)gW;  // resize: el encabezado sigue al buffer
+        bi.bmiHeader.biHeight = (long)-gH;
         SetDIBitsToDevice(gHdc, 0, 0, gW, gH, 0, 0, 0, gH, gImg, &bi, 0);
         Sleep(16);
     }
