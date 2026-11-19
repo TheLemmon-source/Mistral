@@ -104,7 +104,7 @@ static volatile long gVivos = 0, gGen = 1;   // gen: version global (cache)
 static Ser* serCr(Ser* fol, char tc, const char* n2, const char* lb) {
     Ser* s;
     if (serPoolU > 0) { s = serPool[--serPoolU]; s->vr++; }
-    else { s = (Ser*)xM(sizeof(Ser)); if (serPoolU >= serPoolN) serPool = (Ser**)realloc(serPool, (serPoolN + 8) * sizeof(Ser*)); if (!serPool) exit(1); serPoolN += 8;
+    else { s = (Ser*)xM(sizeof(Ser));
            s->A = 0; s->cA = 0; s->nA = 0; s->M = 0; s->TM = 0; s->nM = 0;
            s->cM = 0; s->C = 0; s->cC = 0; s->nC = 0; s->vr = 0; }
     s->n2[0] = n2 ? n2[0] : 0;
@@ -132,9 +132,19 @@ static void serAl(Ser* s) {
             if (s->fol->A[i] == s) s->fol->A[i] = 0;
     s->fol = 0;
     if (s->lb) { xMe(s->lb); s->lb = 0; }
-    for (long i = 0; i < s->nM; i++) if (s->M[i]) { xMe(s->M[i]); s->M[i] = 0; }
+    for (long i = 0; i < s->nM; i++) {
+        if (!s->M[i]) continue;
+        if (s->TM[i] && (s->TM[i][0] == 'g' || s->TM[i][0] == 'x'))
+            xMe((void*)((long long*)s->M[i])[0]);      // imagen dentro del cache
+        xMe(s->M[i]); s->M[i] = 0;
+    }
     s->nM = 0;
-    if (serPoolU < serPoolN) serPool[serPoolU++] = s;
+    if (serPoolU >= serPoolN) {          // pool: capacidad real, no declarada
+        Ser** op = (Ser**)realloc(serPool, (serPoolN + 8) * sizeof(Ser*));
+        if (!op) exit(1);
+        serPool = op; serPoolN += 8;
+    }
+    serPool[serPoolU++] = s;
     gVivos--;
 }
 
@@ -201,8 +211,13 @@ static Ord  oRing[256];
 static volatile long oHead = 0, oTail = 0;
 static char  gRuta[512] = "oroga.dbg";
 
+static void lleno() {
+    fprintf(stderr, "ser: cola llena, orden perdida\n");
+}
+
 static void ordP(long k, Ser* t, long a, long b, long c, long d, long e, long f) {
     long h = oHead;
+    if (h - oTail >= 256) { lleno(); return; }
     oRing[h & 255].k = k;
     oRing[h & 255].t = t;
     oRing[h & 255].r[0] = a; oRing[h & 255].r[1] = b; oRing[h & 255].r[2] = c;
@@ -213,6 +228,7 @@ static void ordP(long k, Ser* t, long a, long b, long c, long d, long e, long f)
 }
 static void ordCr(char tc, Ser* fol) {         // crear rama nueva (controles)
     long h = oHead;
+    if (h - oTail >= 256) { lleno(); return; }
     oRing[h & 255].k = 1;
     oRing[h & 255].t = fol;
     oRing[h & 255].ch = tc;
@@ -221,6 +237,7 @@ static void ordCr(char tc, Ser* fol) {         // crear rama nueva (controles)
 }
 static void ordFeed(Ser* t, unsigned int* im, long w, long h) {  // [[6] camara
     long hh = oHead;
+    if (hh - oTail >= 256) { lleno(); return; }
     oRing[hh & 255].k = 6;
     oRing[hh & 255].t = t;
     oRing[hh & 255].r[0] = w; oRing[hh & 255].r[1] = h;
@@ -508,6 +525,7 @@ static void listaRec(Ser* s) {           // lista colada: pintador y pick
     }
     if (!(ccG(s, CI_FLG) & 1)) return;
     if (gLinN < 1024) gLin[gLinN++] = s;
+    else fprintf(stderr, "ser: colado de 1024 alcanzado: nodo sin pick\n");
     if (s->tc != 'p' || (ccG(s, CI_ABI) & 1))
         for (long pase = 0; pase < 2; pase++)   // pin CI_FLG&8 al final
             for (long i = 0; i < s->nA; i++) {
@@ -691,29 +709,32 @@ static void escritor() {
         } else if (o->k == 4) {                  // guardar oroga.dbg
             FILE* f = fopen(gRuta, "wb");
             if (f) {
-                long idx = 0;
+                long idx = 0; long cort = 0;
                 Ser* lin[1024]; long folto[1024];
                 lin[idx] = gRoot; folto[idx] = -1; idx++;
                 for (long p = 0; p < idx && p < 1024; p++) {
                     Ser* s = lin[p];
-                    fprintf(f, "N %ld %ld %c %s %ld %ld %ld %ld %ld %ld %ld %ld %ld %ld\n",
+                    fprintf(f, "N %ld %ld %c %s %ld %ld %ld %ld %ld %ld %ld %ld %ld %ld %ld\n",
                         p, folto[p], s->tc, s->lb,
                         ccG(s, CI_X), ccG(s, CI_Y), ccG(s, CI_W), ccG(s, CI_H),
                         ccG(s, CI_R), ccG(s, CI_G), ccG(s, CI_B), ccG(s, CI_A),
-                        ccG(s, CI_ABI), ccG(s, CI_FLG));
+                        ccG(s, CI_ABI), ccG(s, CI_FLG), ccG(s, CI_VAL));
                     for (long m = 0; m < s->nM; m++) {
                         if (!s->M[m] || !s->TM[m] || s->TM[m][0] != 'f') continue;
                         double* r6 = (double*)s->M[m];
-                        fprintf(f, "V %ld %ld %d %d %d %d %d %d\n", p,
-                            (long)r6[0], (int)r6[1], (int)r6[2], (int)r6[3],
-                            (int)r6[4], (int)r6[5], 0);
+                        fprintf(f, "V %ld %g %g %g %g %g %g %g\n", p,
+                            r6[0], r6[1], r6[2], r6[3], r6[4], r6[5], 0.0);
                     }
-                    for (long i = 0; i < s->nA; i++)
-                        if (s->A[i] && idx < 1024) {
-                            lin[idx] = s->A[i]; folto[idx] = p; idx++;
-                        }
+                    for (long i = 0; i < s->nA; i++) {
+                        if (!s->A[i]) continue;
+                        if (idx < 1024) { lin[idx] = s->A[i]; folto[idx] = p; idx++; }
+                        else cort++;
+                    }
                 }
                 fclose(f);
+                if (cort) fprintf(stderr,
+                    "ser: arbol de mas de 1024 nodos: %ld quedaron sin guardar\n",
+                    cort);
             }
         } else if (o->k == 5) {                  // accion del editor
             if (o->tx) { if (o->tx[0] == 'G') ordP(4, 0, 0,0,0,0,0,0); }
@@ -827,13 +848,13 @@ static __attribute__((unused)) long desEscena(const char* ruta) {
     if (!f) return 0;
     if (!gRoot) desEscenaRoot();
     char lin[512];
-    Ser** prev = (Ser**)xM(256 * sizeof(Ser*));
-    for (long i = 0; i < 256; i++) prev[i] = 0;
+    Ser** prev = (Ser**)xM(1024 * sizeof(Ser*));
+    for (long i = 0; i < 1024; i++) prev[i] = 0;
     long np = 0;
     while (fgets(lin, sizeof(lin), f)) {
         if (lin[0] == 'N') {
             float fol = 0, tc = 0, x = 0, y = 0, w = 0, h = 0;
-            float r = 0, g = 0, b = 0, a = 0, ab = 0, fl = 0;
+            float r = 0, g = 0, b = 0, a = 0, ab = 0, fl = 0, vv = 0;
             char nomb[256];
             leeNum(lin, 2, &fol);
             leeNum(lin, 3, &tc);
@@ -843,17 +864,24 @@ static __attribute__((unused)) long desEscena(const char* ruta) {
             leeNum(lin, 9, &r);  leeNum(lin, 10, &g);
             leeNum(lin, 11, &b); leeNum(lin, 12, &a);
             leeNum(lin, 13, &ab); leeNum(lin, 14, &fl);
-            char tco = (char)(long)tc;
-            Ser* folp = (fol >= 0 && fol < np) ? prev[(long)fol] : gRoot;  // indice directo
-            Ser* s = serCr(folp, tco, "nd", nomb);
+            leeNum(lin, 15, &vv);                       // CI_VAL persistido
+            Ser* s;
+            if (fol < 0) {                       // N 0 comandos fol -1: la raiz
+                s = gRoot;                       // ya existe: no duplicar
+                if (s->lb) { xMe(s->lb); }
+                s->lb = xSt(nomb);
+            } else {
+                Ser* folp = (fol < np) ? prev[(long)fol] : 0;
+                s = serCr(folp ? folp : gRoot, (char)(long)tc, "nd", nomb);
+            }
             ccS(s, CI_X, (long)(x * QZ)); ccS(s, CI_Y, (long)(y * QZ));
             ccS(s, CI_W, (long)(w * QZ)); ccS(s, CI_H, (long)(h * QZ));
             ccS(s, CI_R, (long)(r * QZ)); ccS(s, CI_G, (long)(g * QZ));
             ccS(s, CI_B, (long)(b * QZ)); ccS(s, CI_A, (long)(a * QZ));
             ccS(s, CI_ABI, (long)ab); ccS(s, CI_FLG, (long)fl);
             ccS(s, CI_RED, 6);
-            ccS(s, CI_VAL, (long)(h * 2));
-            if (np < 256) prev[np++] = s;
+            ccS(s, CI_VAL, (long)vv);
+            if (np < 1024) prev[np++] = s;
         } else if (lin[0] == 'V') {
             float idx = 0, c0 = 0, c1 = 0, c2 = 0, c3 = 0, c4 = 0, c5 = 0;
             leeNum(lin, 1, &idx); leeNum(lin, 2, &c0); leeNum(lin, 3, &c1);
@@ -1109,6 +1137,32 @@ static void pruebas() {
     }
     printf("vuelta al archivo (N = vivos): %s (%ld vs %ld)\n",
            nN == gVivos ? "PASA" : "FALLA", nN, gVivos);
+    if (gRoot->nA > 0 && gRoot->A[0] && gRoot->A[0]->nA > 2
+        && gRoot->A[0]->A[2]->tc == 's') {
+        Ser* sld0 = gRoot->A[0]->A[2];
+        ccS(sld0, CI_VAL, 555);
+        f6Add(sld0, 0.5, 0.0, 0.0, 0.0, (double)CI_VAL, 6.0);  // cond decimal
+        ordP(4, 0, 0, 0, 0, 0, 0, 0); escritor();
+        long v0 = gVivos;
+        while (gRoot->nA > 0) {
+            Ser* h = gRoot->A[gRoot->nA - 1];
+            gRoot->nA--;
+            serAl(h);
+        }
+        serAl(gRoot); gRoot = 0;
+        gSes = 0; gForm = 0; gCamNodo = 0; gSel = 0; gAnt = 0; gArra = 0;
+        long rr = desEscena(gRuta);
+        Ser* sld1 = (gRoot && gRoot->nA > 0 && gRoot->A[0]->nA > 2)
+                    ? gRoot->A[0]->A[2] : 0;
+        printf("carga de escena completa: %s (%ld nodos, %ld vivos)\n",
+               rr == v0 && sld1 ? "PASA" : "FALLA", rr, gVivos);
+        printf("guardado conserva valor: %s (%ld)\n",
+               sld1 && ccG(sld1, CI_VAL) == 555 ? "PASA" : "FALLA",
+               sld1 ? ccG(sld1, CI_VAL) : -1);
+        double* fila = (sld1 && sld1->nM > 0) ? (double*)sld1->M[0] : 0;
+        printf("cond fraccionaria sobrevive: %s (%g)\n",
+               fila && fila[0] == 0.5 ? "PASA" : "FALLA", fila ? fila[0] : -1.0);
+    }
     FILE* o = fopen("ser_check.ppm", "wb");
     if (o) {
         fprintf(o, "P6\n%ld %ld\n255\n", gW, gH);
@@ -1121,6 +1175,7 @@ static void pruebas() {
         fclose(o);
     }
     printf("seres: %ld vivos (%ld antes)\n", gVivos, vivos0);
+    xMe((void*)gImg); gImg = 0;      // sin fuga al salir
     printf("pruebas listas: ser_check.ppm\n");
 }
 
@@ -1137,7 +1192,10 @@ static LRESULT CALLBACK wnProc(HWND v, UINT m, WPARAM w, LPARAM l) {
         BeginPaint(v, &ps); EndPaint(v, &ps);   // valida: mata el flood de WM_PAINT
         return 0; }
     case WM_CLOSE: DestroyWindow(v); return 0;
-    case WM_DESTROY: PostQuitMessage(0); return 0;
+    case WM_DESTROY:                    // autosave: la sesion sobrevive la X
+        ordP(4, 0,0,0,0,0,0,0);
+        escritor();
+        PostQuitMessage(0); return 0;
     case WM_MOUSEMOVE: {
         if (gArra) {
             POINT p; p.x = (long)(short)(l & 65535);
@@ -1187,8 +1245,10 @@ int PASCAL WinMain(HINSTANCE i, HINSTANCE p, LPSTR c, int s) {
     w.lpszClassName = "ser";
     RegisterClassA(&w);
     RECT rc; rc.left = 0; rc.top = 0; rc.right = gW; rc.bottom = gH;
-    AdjustWindowRect(&rc, WS_OVERLAPPEDWINDOW, 0);   // marco: titulo + cerrar
-    gVen = CreateWindowExA(0, "ser", "ser", WS_OVERLAPPEDWINDOW,
+    // gImg es fijo gW x gH: sin resize ni maximizar (buffer no se rehace)
+    long estilo = WS_OVERLAPPEDWINDOW & ~(WS_THICKFRAME | WS_MAXIMIZEBOX);
+    AdjustWindowRect(&rc, (LONG)estilo, 0);
+    gVen = CreateWindowExA(0, "ser", "ser", (DWORD)estilo,
                            60, 60, rc.right - rc.left, rc.bottom - rc.top, 0, 0, i, 0);
     gHdc = GetDC(gVen);
     ShowWindow(gVen, 1);

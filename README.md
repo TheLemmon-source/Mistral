@@ -64,8 +64,16 @@ sin ventana) y escribe `ser_check.ppm` 800x520 como render de verificación.
   la primera vez que el panel abre.
 - Counters en `volatile long`; escritor unico drena `oRing[256]`
   (`oHead`/`oTail` volatiles).
-- Persistencia: serializacion `N idx fol tc label x y w h r g b a abi flg`
-  y `V idx c0..c5`, round-trip verificado por prueba.
+- Persistencia: serializacion `N idx fol tc label x y w h r g b a abi flg val`
+  y `V idx c0..c5` (los 6 double con `%g`, sin truncado), round-trip
+  verificado por prueba (incluye `CI_VAL` y con decimales). La linea
+  `N ... -1` mapea a la raiz ya existente (no duplica). **Autosave**:
+  al cerrar la ventana (`WM_DESTROY`) se volca `oroga.dbg` con la
+  sesion completa. Recortes con aviso en stderr: arbol > 1024 nodos,
+  colado > 1024, cola `oRing` llena (la orden se pierde, no corrompe).
+- Ventana: sin resize ni maximizar (el buffer `gImg` es fijo `gW x gH`,
+  recrearlo quedo para cuando haya camara global). Minimizar/restaurar
+  repinta bien (tamanio constante).
 
 ## Notas LLP64 (Windows x64)
 
