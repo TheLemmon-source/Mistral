@@ -205,11 +205,12 @@ static void ordCr(char tc, Ser* fol) {         // crear rama nueva (controles)
 }
 
 static Ser* gRoot = 0;
+static Ser* gSes  = 0;                  // contenedor de sesiones (ramas q)
 static long gNvoX = 24, gNvoY = 24;
 static void nvoN2(char* out, char t) {           // 2 chars unicos
-    const char* ab[8] = { "b1","k1","s1","l1","p1","e1","c1","r1" };
+    const char* ab[9] = { "b1","k1","s1","l1","p1","e1","c1","q1","r1" };
     long i = (t == 'b') ? 0 : (t == 'k') ? 1 : (t == 's') ? 2 : (t == 'l') ? 3
-           : (t == 'p') ? 4 : (t == 'e') ? 5 : 6;
+           : (t == 'p') ? 4 : (t == 'e') ? 5 : (t == 'q') ? 7 : 6;
     out[0] = ab[i][0]; out[1] = ab[i][1];
 }
 static void zapFol(Ser* s) {                     // guardia: recorte al fol
@@ -574,7 +575,7 @@ static void escritor() {
             const char* nomb = (o->ch == 'b') ? "Boton" : (o->ch == 'k') ? "Chek"
                              : (o->ch == 's') ? "Slid" : (o->ch == 'l') ? "Txt"
                              : (o->ch == 'p') ? "Pan" : (o->ch == 'c') ? "cbo"
-                             : "Nvo";
+                             : (o->ch == 'q') ? "Ses" : "Nvo";
             Ser* s = serCr(fol, o->ch, n2, nomb);
             long mx = fol == gRoot ? gW : ccG(fol, CI_W) / QZ;
             long mh = fol == gRoot ? gH : ccG(fol, CI_H) / QZ;
@@ -676,6 +677,7 @@ static __attribute__((unused)) void pisaRaton(float mx, float my) {
         else if (v == 2) ordCr('s', gRoot);
         else if (v == 3) { if (obj) ordP(2, obj, 0, 0, 0, 0, 0, 0); }
         else if (v == 4) ordP(4, 0, 0, 0, 0, 0, 0, 0);
+        else if (v == 5) ordCr('q', gSes);
     }
     exRows(s);
 }
@@ -809,9 +811,9 @@ static void escModelo() {                   // escena de arranque
     ccS(rail, CI_W, 180 * QZ); ccS(rail, CI_H, 120 * QZ);
     ccS(rail, CI_A, 0.3f * QZ); ccS(rail, CI_FLG, 1); ccS(rail, CI_ABI, 1);
     ccS(rail, CI_RED, 12);
-    const char* nomb[5] = { "Bot", "Chek", "Slid", "Borra", "Guardar" };
-    char tcs[5] = { 'e', 'e', 'e', 'e', 'e' };
-    for (long i = 0; i < 5; i++) {
+    const char* nomb[6] = { "Bot", "Chek", "Slid", "Borra", "Guardar", "Sesion" };
+    char tcs[6] = { 'e', 'e', 'e', 'e', 'e', 'e' };
+    for (long i = 0; i < 6; i++) {
         Ser* e = serCr(rail, tcs[i], "eS", nomb[i]);
         ccS(e, CI_X, (8 + (i % 2) * 86) * QZ);
         ccS(e, CI_Y, (20 + (i / 2) * 30) * QZ);
@@ -820,6 +822,45 @@ static void escModelo() {                   // escena de arranque
         ccS(e, CI_A, QZ); ccS(e, CI_FLG, 1 | 4); ccS(e, CI_RED, 8);
         ccS(e, CI_VAL, (long)i);
     }
+    gSes = serCr(gRoot, 'p', "pS", "Sesiones");
+    ccS(gSes, CI_X, 300 * QZ); ccS(gSes, CI_Y, 170 * QZ);
+    ccS(gSes, CI_W, 260 * QZ); ccS(gSes, CI_H, 170 * QZ);
+    ccS(gSes, CI_R, 0.12f * QZ); ccS(gSes, CI_G, 0.2f * QZ); ccS(gSes, CI_B, 0.16f * QZ);
+    ccS(gSes, CI_A, QZ); ccS(gSes, CI_FLG, 1); ccS(gSes, CI_ABI, 1); ccS(gSes, CI_RED, 8);
+    Ser* se1 = serCr(gSes, 'p', "s1", "Ses.1");
+    ccS(se1, CI_X, 8 * QZ); ccS(se1, CI_Y, 20 * QZ);
+    ccS(se1, CI_W, 118 * QZ); ccS(se1, CI_H, 60 * QZ);
+    ccS(se1, CI_R, 0.18f * QZ); ccS(se1, CI_G, 0.3f * QZ); ccS(se1, CI_B, 0.28f * QZ);
+    ccS(se1, CI_A, QZ); ccS(se1, CI_FLG, 1); ccS(se1, CI_ABI, 1); ccS(se1, CI_RED, 6);
+    Ser* b1 = serCr(se1, 'b', "b1", "ir");
+    ccS(b1, CI_X, 8 * QZ); ccS(b1, CI_Y, 24 * QZ);
+    ccS(b1, CI_W, 40 * QZ); ccS(b1, CI_H, 20 * QZ);
+    ccS(b1, CI_R, 0.2f * QZ); ccS(b1, CI_G, 0.5f * QZ); ccS(b1, CI_B, 0.9f * QZ);
+    ccS(b1, CI_A, QZ); ccS(b1, CI_FLG, 1); ccS(b1, CI_RED, 4);
+    Ser* se2 = serCr(gSes, 'p', "s2", "Ses.2");
+    ccS(se2, CI_X, 132 * QZ); ccS(se2, CI_Y, 20 * QZ);
+    ccS(se2, CI_W, 118 * QZ); ccS(se2, CI_H, 60 * QZ);
+    ccS(se2, CI_R, 0.18f * QZ); ccS(se2, CI_G, 0.3f * QZ); ccS(se2, CI_B, 0.28f * QZ);
+    ccS(se2, CI_A, QZ); ccS(se2, CI_FLG, 1); ccS(se2, CI_ABI, 1); ccS(se2, CI_RED, 6);
+    Ser* v2 = serCr(se2, 's', "v2", "v2");
+    ccS(v2, CI_X, 8 * QZ); ccS(v2, CI_Y, 24 * QZ);
+    ccS(v2, CI_W, 100 * QZ); ccS(v2, CI_H, 18 * QZ);
+    ccS(v2, CI_R, 0.9f * QZ); ccS(v2, CI_G, 0.6f * QZ); ccS(v2, CI_B, 0.1f * QZ);
+    ccS(v2, CI_A, QZ); ccS(v2, CI_FLG, 1); ccS(v2, CI_VAL, 300); ccS(v2, CI_RED, 6);
+    Ser* pG = serCr(gRoot, 'p', "pG", "Generalidades");
+    ccS(pG, CI_X, 300 * QZ); ccS(pG, CI_Y, 360 * QZ);
+    ccS(pG, CI_W, 280 * QZ); ccS(pG, CI_H, 150 * QZ);
+    ccS(pG, CI_R, 0.15f * QZ); ccS(pG, CI_G, 0.15f * QZ); ccS(pG, CI_B, 0.25f * QZ);
+    ccS(pG, CI_A, QZ); ccS(pG, CI_FLG, 1); ccS(pG, CI_ABI, 1); ccS(pG, CI_RED, 8);
+    Ser* gc = serCr(pG, 'k', "gc", "op");
+    ccS(gc, CI_X, 8 * QZ); ccS(gc, CI_Y, 22 * QZ);
+    ccS(gc, CI_W, 60 * QZ); ccS(gc, CI_H, 20 * QZ);
+    ccS(gc, CI_R, 0.2f * QZ); ccS(gc, CI_G, 0.3f * QZ); ccS(gc, CI_B, 0.4f * QZ);
+    ccS(gc, CI_A, QZ); ccS(gc, CI_FLG, 1 | 2); ccS(gc, CI_RED, 4);
+    Ser* gl = serCr(pG, 'l', "gl", "comunes aqui");
+    ccS(gl, CI_X, 80 * QZ); ccS(gl, CI_Y, 26 * QZ);
+    ccS(gl, CI_R, QZ); ccS(gl, CI_G, QZ); ccS(gl, CI_B, QZ); ccS(gl, CI_A, QZ);
+    ccS(gl, CI_FLG, 1);
 }
 
 // ---- [T] pruebas (sin ventana) ------------------------------------------------
@@ -835,6 +876,9 @@ static void pruebas() {
     pintaTodo();
     Ser* b = elige(30, 60);
     printf("pick sobre boton: %s\n", b && b->tc == 'b' ? "PASA" : "FALLA");
+    Ser* sb = elige(320, 220);
+    printf("pick sesion anidada en cascada: %s\n",
+           sb && sb->tc == 'b' ? "PASA" : "FALLA");
     if (b) {
         long x0 = ccG(b, CI_X);
         ordP(0, b, 1, 120 * QZ, 0, 3, 0, 0);  // r=(ci,val,x,op3)
