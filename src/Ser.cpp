@@ -8,7 +8,9 @@
 //             fijo QZ=256), M[]/TM[] matrices dinamicas por demanda ('f6'
 //             fila de condicion y asignacion, 's' texto).
 //  SM       : fila [cond, ci, cmp, op, dst, arg]; cond 0=siempre 1=lt 2=gt
-//             3=eq ; op 0=set 1=add 2=toggle 3=clip 4=mul.
+//             3=eq ; op 0=set 1=add 2=toggle 3=clip 4=mul
+//             op 5=crb: crea rama hija de tipo (char)dst bajo el nodo script;
+//             arg = tope de hijos (nA < arg) => cascada sin duplicados.
 //  escritor : unico (par obrero en Win; sicrono en pruebas). La GUI encola.
 //  raster   : cache por version (solo repinta si cambia el gen), colado en
 //             orden de A[] (el mismo orden sirve para pick, multiply z).
@@ -145,6 +147,7 @@ static void ccS(Ser* s, long i, long v) {
 }
 
 // ---- [V] SM: filas de condicion y asignacion --------------------------------
+static void ordCr(char tc, Ser* fol);      // encola creacion de rama ([Q])
 static double* f6Add(Ser* s, double cond, double ci, double cmp,
                      double op, double dst, double arg) {
     long k = -1;
@@ -167,6 +170,14 @@ static void exRows(Ser* s) {              // ejecucion de filas SM del nodo
         if (cond == 1) { if (!(v < cmp)) continue; }
         else if (cond == 2) { if (!(v > cmp)) continue; }
         else if (cond == 3) { if (v != cmp) continue; }
+        if (op == 5) {                   // meta-UI: crb crear rama hija en cascada
+            char tco = (char)dst;
+            long cap = arg;
+            if (cap < 1) cap = 1;
+            if (tco && s->nA < cap) ordCr(tco, s);
+            s->vr++; gGen++;
+            continue;
+        }
         long* d = 0;
         if (dst >= 0 && dst < s->nC) d = (long*)&s->C[dst];
         if (!d) continue;
@@ -206,6 +217,7 @@ static void ordCr(char tc, Ser* fol) {         // crear rama nueva (controles)
 
 static Ser* gRoot = 0;
 static Ser* gSes  = 0;                  // contenedor de sesiones (ramas q)
+static Ser* gForm = 0;                  // nodo script meta-UI (filas op 5)
 static volatile long gFS = 2;           // escala de texto: celdas por glifo
 static long gNvoX = 24, gNvoY = 24;
 static void nvoN2(char* out, char t) {           // 2 chars unicos
@@ -866,6 +878,14 @@ static void escModelo() {                   // escena de arranque
     ccS(gl, CI_X, 80 * QZ); ccS(gl, CI_Y, 26 * QZ);
     ccS(gl, CI_R, QZ); ccS(gl, CI_G, QZ); ccS(gl, CI_B, QZ); ccS(gl, CI_A, QZ);
     ccS(gl, CI_FLG, 1);
+    gForm = serCr(gRoot, 'p', "pF", "Gen");   // meta-UI: forma que se forma
+    ccS(gForm, CI_X, 570 * QZ); ccS(gForm, CI_Y, 230 * QZ);
+    ccS(gForm, CI_W, 200 * QZ); ccS(gForm, CI_H, 120 * QZ);
+    ccS(gForm, CI_R, 0.16f * QZ); ccS(gForm, CI_G, 0.22f * QZ); ccS(gForm, CI_B, 0.3f * QZ);
+    ccS(gForm, CI_A, QZ); ccS(gForm, CI_FLG, 1); ccS(gForm, CI_ABI, 0); ccS(gForm, CI_RED, 8);
+    f6Add(gForm, 3, (double)CI_ABI, 1.0, 5.0, (double)'b', 3.0);   // abrir -> 1 boton
+    f6Add(gForm, 3, (double)CI_ABI, 1.0, 5.0, (double)'k', 3.0);   // + 1 check
+    f6Add(gForm, 3, (double)CI_ABI, 1.0, 5.0, (double)'s', 3.0);   // + 1 slider
 }
 
 // ---- [T] pruebas (sin ventana) ------------------------------------------------
@@ -928,6 +948,27 @@ static void pruebas() {
         printf("cache por agrupados (repinta solo su grupo): %s (%ld -> %ld prims, %ld%%)\n",
                (gRq > 0 && gRq < prims1) ? "PASA" : "FALLA", prims1, gRq,
                prims1 ? gRq * 100 / prims1 : 0);
+    }
+    Ser* gf = gForm;
+    if (gf && gf->tc == 'p') {
+        long n0 = gf->nA;
+        ccS(gf, CI_ABI, 1); exRows(gf); escritor();
+        long n1 = gf->nA;
+        printf("meta-UI despliegue en cascada: %s (%ld -> %ld hijos)\n",
+               n1 == n0 + 3 ? "PASA" : "FALLA", n0, n1);
+        ccS(gf, CI_ABI, 0); exRows(gf); escritor();
+        ccS(gf, CI_ABI, 1); exRows(gf); escritor();
+        printf("meta-UI cascada sin duplicados: %s (%ld hijos)\n",
+               gf->nA == n1 ? "PASA" : "FALLA", gf->nA);
+        long tipos = 0;
+        for (long i = 0; i < gf->nA; i++) {
+            if (!gf->A[i]) continue;
+            if (gf->A[i]->tc == 'b' || gf->A[i]->tc == 'k'
+                || gf->A[i]->tc == 's') tipos++;
+        }
+        printf("meta-UI tipos creados (b,k,s): %s\n", tipos == 3 ? "PASA" : "FALLA");
+        ordP(4, 0, 0, 0, 0, 0, 0, 0);       // re-volcado con los hijos meta
+        escritor();
     }
     printf("seres sin fuga en serccion: %s\n", guardado ? "PASA" : "FALLA");
     long nN = 0;

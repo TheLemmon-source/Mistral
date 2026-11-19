@@ -16,6 +16,15 @@ src/Ser.cpp    <- el sistema completo
 oroga.dbg      <- volcado de serializacion (formato N/V, se regenera)
 ```
 
+## Meta-UI
+
+Todo control puede llevar filas SM que **generan otros controles**
+(op 5 `crb`), no solo asignar su propio estado. El panel `Gen` de la
+escena modelo lo demuestra: al abrirlo despliega un boton, un check
+y un slider propios; el tope por `arg` evita duplicados en cada
+reapertura. Eso es el paso previo a formularios en cascada del todo
+scriptados (hoy el editor requiere clics para crear controles).
+
 ## Compilar
 
 Con GCC (MinGW64 en Windows):
@@ -40,6 +49,12 @@ sin ventana) y escribe `ser_check.ppm` 800x520 como render de verificación.
 - Matrices `M[i]` con identificador `TM[i]` char*: `'f6'` = fila SM
   `[cond,ci,cmp,op,dst,arg]`, `'g'` = cache de campocromatico
   (`long long[4]`: img, w, h, version), `'s'` = texto.
+- Filas SM: op `0=set 1=add 2=toggle 3=clip 4=mul` y op `5=crb`:
+  crea rama hija de tipo `(char)dst` bajo el nodo script, con tope
+  `arg` (`nA < arg`) => despliegue en cascada sin duplicados. Es el
+  meta-UI: filas de condicion/asignacion que generan controles.
+  Ejemplo: `f6Add(p, 3, CI_ABI, 1, 5, 'b', 3)` despliega un boton
+  la primera vez que el panel abre.
 - Counters en `volatile long`; escritor unico drena `oRing[256]`
   (`oHead`/`oTail` volatiles).
 - Persistencia: serializacion `N idx fol tc label x y w h r g b a abi flg`
