@@ -1,0 +1,52 @@
+# Ser
+
+Sistema universal en C++: una sola rama anidable (`struct Ser`) donde todo termina
+siendo **condición y asignación**. Sin structs especializados, sin enums, sin
+hardcodeo: cada nodo guarda su estado en matrices dinámicas `M[]` dirigidas por
+descriptores `TM[]`, en punto fijo (`QZ = 256`).
+
+Un único archivo: `src/Ser.cpp` (~1040 líneas), compilable en Windows x64
+(MinGW64 / GCC 9.2, Dev-C++ o Makefile.win).
+
+## Estructura del repo
+
+```
+README.md      <- este archivo (generalidades del repo)
+src/Ser.cpp    <- el sistema completo
+oroga.dbg      <- volcado de serializacion (formato N/V, se regenera)
+```
+
+## Compilar
+
+Con GCC (MinGW64 en Windows):
+
+```
+g++ -O2 -std=c++11 src/Ser.cpp -o ser.exe -luser32 -lgdi32
+```
+
+En Dev-C++ (Proyecto Win32 GUI, C++11) o Makefile.win → target `Ser.o` +
+enlazado con `-luser32 -lgdi32`. Con ventana abre un editor de controles:
+botones, checks, sliders, redondeados, caches, sesiones anidadas.
+
+Sin modificar nada, `main()` corre primero la batería de pruebas (11/11 PASA,
+sin ventana) y escribe `ser_check.ppm` 800x520 como render de verificación.
+
+## Formato
+
+- Nodo: `struct Ser` con `fol` (padre), `A[]` (hijos, orden = z-order),
+  etiqueta `n2[2]` y tipo `tc` char (`r` rect, `p` panel, `b` boton,
+  `k` check, `s` slider, `l` texto, `e` editor, `c` contenedor,
+  `o` cubo/textura, `q` sesion).
+- Matrices `M[i]` con identificador `TM[i]` char*: `'f6'` = fila SM
+  `[cond,ci,cmp,op,dst,arg]`, `'g'` = cache de campocromatico
+  (`long long[4]`: img, w, h, version), `'s'` = texto.
+- Counters en `volatile long`; escritor unico drena `oRing[256]`
+  (`oHead`/`oTail` volatiles).
+- Persistencia: serializacion `N idx fol tc label x y w h r g b a abi flg`
+  y `V idx c0..c5`, round-trip verificado por prueba.
+
+## Notas LLP64 (Windows x64)
+
+En Windows x64 `long` es de 4 bytes (LLP64) pero los punteros son de 8:
+por eso las filas de cache `'g'` usan `long long` (garantizado 64 bits),
+no `long`. En Linux (`long` = 8) compila igual.

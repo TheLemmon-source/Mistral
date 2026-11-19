@@ -447,21 +447,21 @@ static long extH(Ser* s) {
     if (h < 16) h = 16;
     return h + 6;
 }
-static long* cacheRow(Ser* s, long w, long h) {   // M fila 'g': [img,w,h,vv]
+static long long* cacheRow(Ser* s, long w, long h) {   // M fila 'g': [img,w,h,vv]
     long k = -1;
     for (long i = 0; i < s->nM; i++)
         if (s->TM[i] && s->TM[i][0] == 'g') { k = i; break; }
     if (k < 0) { k = s->nM; if (k >= s->cM) grC(s, k); s->nM = k + 1;
                  s->TM[k] = (char*)"g"; s->M[k] = 0; }
-    long* c4 = (long*)s->M[k];
+    long long* c4 = (long long*)s->M[k];
     if (!c4 || c4[1] < w || c4[2] < h) {
-        long nw = (c4 && c4[1] > w) ? c4[1] : w;
-        long nh = (c4 && c4[2] > h) ? c4[2] : h;
+        long nw = (c4 && c4[1] > w) ? (long)c4[1] : w;
+        long nh = (c4 && c4[2] > h) ? (long)c4[2] : h;
         if (c4) xMe((void*)c4[0]);
         unsigned int* im = (unsigned int*)xM((unsigned long)(nw * nh) * sizeof(unsigned int));
         memset(im, 0, (size_t)(nw * nh) * sizeof(unsigned int));
-        c4 = (long*)xM(4 * sizeof(long));
-        c4[0] = (long)im; c4[1] = nw; c4[2] = nh; c4[3] = -1;
+        c4 = (long long*)xM(4 * sizeof(long long));
+        c4[0] = (long long)im; c4[1] = nw; c4[2] = nh; c4[3] = -1;
         s->M[k] = c4;
     }
     return c4;
@@ -471,9 +471,9 @@ static void limpia(int x, int y, int w, int h) {  // fondo en zona sucia
     for (int j = y; j < y + h; j++)
         for (int i = x; i < x + w; i++) px(i, j, bg);
 }
-static void blit(long* c4, int dx, int dy) {      // cache vigente: volcado
+static void blit(long long* c4, int dx, int dy) { // cache vigente: volcado
     unsigned int* im = (unsigned int*)c4[0];
-    long w = c4[1], h = c4[2];
+    long w = (long)c4[1], h = (long)c4[2];
     for (long j = 0; j < h; j++)
         for (long i = 0; i < w; i++) {
             unsigned int c = im[j * w + i];
@@ -491,7 +491,7 @@ static void pintaTodo() {
             Ser* c = gRoot->A[i];
             if (!c) continue;
             long w = extW(c), h = extH(c);
-            long* c4 = cacheRow(c, w, h);
+            long long* c4 = cacheRow(c, w, h);
             long vis = ccG(c, CI_FLG) & 1;
             int ax = (int)(ccG(c, CI_X) - 3 * QZ) / QZ;
             int ay = (int)(ccG(c, CI_Y) - 3 * QZ) / QZ;
@@ -500,8 +500,8 @@ static void pintaTodo() {
             if (!vis) { c4[3] = -1; continue; }
             if (gv == c4[3]) { blit(c4, ax, ay); continue; }
             unsigned int* sub = (unsigned int*)c4[0];
-            memset(sub, 0, (size_t)(c4[1] * c4[2]) * sizeof(unsigned int));
-            gTgt = sub; gTW = c4[1]; gTH = c4[2];
+            memset(sub, 0, (size_t)((long)c4[1] * (long)c4[2]) * sizeof(unsigned int));
+            gTgt = sub; gTW = (long)c4[1]; gTH = (long)c4[2];
             pintaNodo(c, 3 - (float)(ccG(c, CI_X)) / QZ,   // siempre en (3,3)
                          3 - (float)(ccG(c, CI_Y)) / QZ);
             c4[3] = gv;
@@ -902,7 +902,7 @@ static void pruebas() {
         Ser* c = gRoot->A[i];
         if (c) for (long q = 0; q < c->nM; q++)
             if (c->TM[q] && c->TM[q][0] == 'g' && c->M[q])
-                ((long*)c->M[q])[3] = -1;
+                ((long long*)c->M[q])[3] = -1;
     }
     gImgGen = -1;
     gPxC = 0; gRq = 0;
