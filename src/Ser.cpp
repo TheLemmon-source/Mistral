@@ -206,6 +206,7 @@ static void ordCr(char tc, Ser* fol) {         // crear rama nueva (controles)
 
 static Ser* gRoot = 0;
 static Ser* gSes  = 0;                  // contenedor de sesiones (ramas q)
+static volatile long gFS = 2;           // escala de texto: celdas por glifo
 static long gNvoX = 24, gNvoY = 24;
 static void nvoN2(char* out, char t) {           // 2 chars unicos
     const char* ab[9] = { "b1","k1","s1","l1","p1","e1","c1","q1","r1" };
@@ -347,13 +348,17 @@ static void rectoQ(float x, float y, float w, float h, unsigned int c, float rad
         }
 }
 static void texto(float x, float y, const char* t, unsigned int c) {
+    long sc = gFS < 1 ? 1 : gFS;
     for (long k = 0; t[k]; k++) {
         const char* g = fGly(t[k]);
-        for (int j = 0; j < 5; j++) {
+        for (long j = 0; j < 5; j++) {
             int fil = g[j] - '0';
-            for (int i = 0; i < 3; i++) {
-                int ax = (fil >> (2 - i)) & 1;
-                if (ax) px((int)(x + k * 5 + i + 1), (int)(y + j + 1), c);
+            for (long i = 0; i < 3; i++) {
+                if (((fil >> (2 - i)) & 1) == 0) continue;
+                for (long b = 0; b < sc; b++)
+                    for (long a = 0; a < sc; a++)
+                        px((int)(x + k * 5 * sc + i * sc + a + 1),
+                           (int)(y + j * sc + b + 1), c);
             }
         }
     }
@@ -380,7 +385,7 @@ static void pintaNodo(Ser* s, float ox, float oy) {
     if (s->tc == 'b' || s->tc == 'e') {
         if (ccG(s, CI_EXT) > 0) col = pr(r * 1.4f, g * 1.4f, b * 1.4f, a);
         rectoQ(x, y, w, h, col, red);
-        texto(x + 6, y + h * 0.5f - 4, s->lb, pr(1, 1, 1, 1));
+        texto(x + 4, y + (h - 5 * gFS) * 0.5f, s->lb, pr(1, 1, 1, 1));
     } else if (s->tc == 'k') {
         rectoQ(x, y, w, h, col, red);
         if (fl & 2) rectoQ(x + 6, y + 6, w - 12 < 0 ? 0 : w - 12,
@@ -391,7 +396,7 @@ static void pintaNodo(Ser* s, float ox, float oy) {
         if (fr < 0) fr = 0;
                 if (fr > 1) fr = 1;
         rectoQ(x + 2, y + 2, (w - 4) * fr, h - 4, col, red);
-        texto(x + 6, y + h * 0.5f - 4, s->lb, pr(1, 1, 1, 1));
+        texto(x + 4, y + (h - 5 * gFS) * 0.5f, s->lb, pr(1, 1, 1, 1));
     } else if (s->tc == 'l') {
         texto(x, y, s->lb, col);
     } else if (s->tc == 'c') {
@@ -403,7 +408,7 @@ static void pintaNodo(Ser* s, float ox, float oy) {
         rectoQ(x, y, w, h, col, red);
         rectoQ(x + 1, y + 1, w - 2 < 0 ? 0 : w - 2, 14 < h - 2 ? 14 : h - 2,
                pr(r * 1.35f, g * 1.35f, b * 1.35f, a > 0.5f ? 1 : a), red);
-        texto(x + 5, y + 5, s->lb, pr(1, 1, 1, 1));
+        texto(x + 4, y + 3, s->lb, pr(1, 1, 1, 1));
     }
     if (s->tc != 'r' && ccG(s, CI_SEL)) {
         rectoQ(x - 1, y - 1, w + 2, 1, pr(1, 1, 1, 1), 0);
@@ -957,6 +962,10 @@ static HDC  gHdc = 0;
 
 static LRESULT CALLBACK wnProc(HWND v, UINT m, WPARAM w, LPARAM l) {
     switch (m) {
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        BeginPaint(v, &ps); EndPaint(v, &ps);   // valida: mata el flood de WM_PAINT
+        return 0; }
     case WM_CLOSE: DestroyWindow(v); return 0;
     case WM_DESTROY: PostQuitMessage(0); return 0;
     case WM_MOUSEMOVE: {
@@ -999,14 +1008,18 @@ static LRESULT CALLBACK wnProc(HWND v, UINT m, WPARAM w, LPARAM l) {
 int PASCAL WinMain(HINSTANCE i, HINSTANCE p, LPSTR c, int s) {
     (void)p; (void)c; (void)s;
     WNDCLASSA w;
-    w.style = 0;
+    w.style = CS_OWNDC;
     w.lpfnWndProc = wnProc;
     w.cbClsExtra = 0; w.cbWndExtra = 0;
     w.hInstance = i;
-    w.hIcon = 0; w.hCursor = 0; w.hbrBackground = 0; w.lpszMenuName = 0;
+    w.hIcon = 0; w.hCursor = LoadCursorA(0, IDC_ARROW);
+    w.hbrBackground = 0; w.lpszMenuName = 0;
     w.lpszClassName = "ser";
     RegisterClassA(&w);
-    gVen = CreateWindowExA(0, "ser", "ser", 0, 60, 60, gW, gH + 32, 0, 0, i, 0);
+    RECT rc; rc.left = 0; rc.top = 0; rc.right = gW; rc.bottom = gH;
+    AdjustWindowRect(&rc, WS_OVERLAPPEDWINDOW, 0);   // marco: titulo + cerrar
+    gVen = CreateWindowExA(0, "ser", "ser", WS_OVERLAPPEDWINDOW,
+                           60, 60, rc.right - rc.left, rc.bottom - rc.top, 0, 0, i, 0);
     gHdc = GetDC(gVen);
     ShowWindow(gVen, 1);
     gImg = (unsigned int*)xM((unsigned long)(gW * gH) * sizeof(unsigned int));
