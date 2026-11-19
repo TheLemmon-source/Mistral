@@ -11,6 +11,10 @@
 //             3=eq ; op 0=set 1=add 2=toggle 3=clip 4=mul
 //             op 5=crb: crea rama hija de tipo (char)dst bajo el nodo script;
 //             arg = tope de hijos (nA < arg) => cascada sin duplicados.
+//  pin      : CI_FLG bit 8: primer plano (colado/pick al final) e inamovible
+//             (sin mandaAlFrente, sin arrastre; slider sigue dando valor).
+//  camara   : nodo 'm' con fila TM 'x' [img,w,h,ver]; ordFeed (k=6) la carga;
+//             sin fuente pinta CAM. Bezel Cam fijado contiene la camara.
 //  escritor : unico (par obrero en Win; sicrono en pruebas). La GUI encola.
 //  raster   : cache por version (solo repinta si cambia el gen), colado en
 //             orden de A[] (el mismo orden sirve para pick, multiply z).
@@ -148,6 +152,7 @@ static void ccS(Ser* s, long i, long v) {
 
 // ---- [V] SM: filas de condicion y asignacion --------------------------------
 static void ordCr(char tc, Ser* fol);      // encola creacion de rama ([Q])
+static void ordFeed(Ser* t, unsigned int* im, long w, long h);  // [W] camara
 static double* f6Add(Ser* s, double cond, double ci, double cmp,
                      double op, double dst, double arg) {
     long k = -1;
@@ -214,16 +219,30 @@ static void ordCr(char tc, Ser* fol) {         // crear rama nueva (controles)
     oRing[h & 255].tx = 0;
     oHead = h + 1;
 }
+static void ordFeed(Ser* t, unsigned int* im, long w, long h) {  // [[6] camara
+    long hh = oHead;
+    oRing[hh & 255].k = 6;
+    oRing[hh & 255].t = t;
+    oRing[hh & 255].r[0] = w; oRing[hh & 255].r[1] = h;
+    oRing[hh & 255].r[2] = 0; oRing[hh & 255].r[3] = 0;
+    oRing[hh & 255].r[4] = 0; oRing[hh & 255].r[5] = 0;
+    oRing[hh & 255].ch = 0;
+    oRing[hh & 255].tx = (char*)im;
+    oHead = hh + 1;
+}
 
 static Ser* gRoot = 0;
 static Ser* gSes  = 0;                  // contenedor de sesiones (ramas q)
 static Ser* gForm = 0;                  // nodo script meta-UI (filas op 5)
+static Ser* gCamNodo = 0;               // camara 'm' alimentada en ventana
+__attribute__((unused)) static long gCamF = 0;                  // fase de la fuente
+__attribute__((unused)) static unsigned int gBufCam[32 * 24];   // marco sintetico
 static volatile long gFS = 2;           // escala de texto: celdas por glifo
 static long gNvoX = 24, gNvoY = 24;
 static void nvoN2(char* out, char t) {           // 2 chars unicos
-    const char* ab[9] = { "b1","k1","s1","l1","p1","e1","c1","q1","r1" };
+    const char* ab[10] = { "b1","k1","s1","l1","p1","e1","c1","q1","r1","m1" };
     long i = (t == 'b') ? 0 : (t == 'k') ? 1 : (t == 's') ? 2 : (t == 'l') ? 3
-           : (t == 'p') ? 4 : (t == 'e') ? 5 : (t == 'q') ? 7 : 6;
+           : (t == 'p') ? 4 : (t == 'e') ? 5 : (t == 'q') ? 7 : (t == 'm') ? 9 : 6;
     out[0] = ab[i][0]; out[1] = ab[i][1];
 }
 static void zapFol(Ser* s) {                     // guardia: recorte al fol
@@ -376,6 +395,30 @@ static void texto(float x, float y, const char* t, unsigned int c) {
     }
 }
 
+// ---- [X] camara: fila 'x' = [img,w,h,ver] -----------------------------------
+static long long* camFil(Ser* s) {       // frame vivo si existe
+    for (long i = 0; i < s->nM; i++)
+        if (s->TM[i] && s->TM[i][0] == 'x' && s->M[i]) return (long long*)s->M[i];
+    return 0;
+}
+static long long* camRow(Ser* s, long w, long h) {   // crea/ajusta fila 'x'
+    long k = -1;
+    for (long i = 0; i < s->nM; i++)
+        if (s->TM[i] && s->TM[i][0] == 'x') { k = i; break; }
+    if (k < 0) { k = s->nM; if (k >= s->cM) grC(s, k); s->nM = k + 1;
+                 s->TM[k] = (char*)"x"; s->M[k] = 0; }
+    long long* c4 = (long long*)s->M[k];
+    if (!c4 || c4[1] != w || c4[2] != h) {
+        if (c4) xMe((void*)c4[0]);
+        unsigned int* im = (unsigned int*)xM((unsigned long)(w * h) * sizeof(unsigned int));
+        memset(im, 0, (size_t)(w * h) * sizeof(unsigned int));
+        if (!c4) c4 = (long long*)xM(4 * sizeof(long long));
+        c4[0] = (long long)im; c4[1] = w; c4[2] = h; c4[3] = 0;
+        s->M[k] = c4;
+    }
+    return c4;
+}
+
 // ---- [P] pintado del arbol (colado por orden A[], cache por gen) ------------
 static Ser* gLin[1024];    // lista colada pintador (mismo orden sirve al pick)
 static long gLinN = 0;
@@ -416,6 +459,20 @@ static void pintaNodo(Ser* s, float ox, float oy) {
         float rx = x + w * 0.5f, ry = y + h * 0.5f;
         float rr = w < h ? w : h; rr *= 0.4f;
         rectoQ(rx - rr, ry - rr, rr * 2, rr * 2, col, rr * (0.5f + 0.4f * t));
+    } else if (s->tc == 'm') {   // camara: frame vivo o placeholder
+        long long* fc = camFil(s);
+        if (fc && fc[0] && fc[1] > 0 && fc[2] > 0) {
+            unsigned int* im = (unsigned int*)fc[0];
+            for (long j = 0; j < (long)h; j++)
+                for (long i = 0; i < (long)w; i++) {
+                    long si = (long)((float)i * (float)fc[1] / w);
+                    long sj = (long)((float)j * (float)fc[2] / h);
+                    px((int)(x + i), (int)(y + j), im[sj * (long)fc[1] + si]);
+                }
+        } else {
+            rectoQ(x, y, w, h, pr(0.08f, 0.1f, 0.14f, a), red);
+            texto(x + 4, y + (h - 5 * gFS) * 0.5f, "CAM", pr(0.7f, 0.8f, 0.9f, 1));
+        }
     } else {   // 'p' y 'r' y 'o': panel (recuadre redondeado de demo)
         rectoQ(x, y, w, h, col, red);
         rectoQ(x + 1, y + 1, w - 2 < 0 ? 0 : w - 2, 14 < h - 2 ? 14 : h - 2,
@@ -429,20 +486,35 @@ static void pintaNodo(Ser* s, float ox, float oy) {
         rectoQ(x + w, y - 1, 1, h + 2, pr(1, 1, 1, 1), 0);
     }
     if (s->tc != 'p' || (ccG(s, CI_ABI) & 1)) {   // cascada: despliegue
-        for (long i = 0; i < s->nA; i++) pintaNodo(s->A[i], x, y);
+        for (long pase = 0; pase < 2; pase++)     // pin CI_FLG&8 al final
+            for (long i = 0; i < s->nA; i++) {
+                Ser* h = s->A[i];
+                if (!h || (((ccG(h, CI_FLG) & 8) != 0) != (pase == 1))) continue;
+                pintaNodo(h, x, y);
+            }
     }
 }
 
 static void listaRec(Ser* s) {           // lista colada: pintador y pick
     if (!s) return;
     if (s->tc == 'r') {
-        for (long i = 0; i < s->nA; i++) listaRec(s->A[i]);
+        for (long pase = 0; pase < 2; pase++)   // pin CI_FLG&8 al final
+            for (long i = 0; i < s->nA; i++) {
+                Ser* h = s->A[i];
+                if (!h || (((ccG(h, CI_FLG) & 8) != 0) != (pase == 1))) continue;
+                listaRec(h);
+            }
         return;
     }
     if (!(ccG(s, CI_FLG) & 1)) return;
     if (gLinN < 1024) gLin[gLinN++] = s;
     if (s->tc != 'p' || (ccG(s, CI_ABI) & 1))
-        for (long i = 0; i < s->nA; i++) listaRec(s->A[i]);
+        for (long pase = 0; pase < 2; pase++)   // pin CI_FLG&8 al final
+            for (long i = 0; i < s->nA; i++) {
+                Ser* h = s->A[i];
+                if (!h || (((ccG(h, CI_FLG) & 8) != 0) != (pase == 1))) continue;
+                listaRec(h);
+            }
 }
 static long gvUp(Ser* s) {               // version del grupo = suma de rama
     long v = (long)s->vr;
@@ -504,9 +576,10 @@ static void pintaTodo() {
     gLinN = 0;
     listaRec(gRoot);                              // pick comparte el colado
     if (gRoot) {
+        for (long pase = 0; pase < 2; pase++)         // pin CI_FLG&8 al final
         for (long i = 0; i < gRoot->nA; i++) {
             Ser* c = gRoot->A[i];
-            if (!c) continue;
+            if (!c || (((ccG(c, CI_FLG) & 8) != 0) != (pase == 1))) continue;
             long w = extW(c), h = extH(c);
             long long* c4 = cacheRow(c, w, h);
             long vis = ccG(c, CI_FLG) & 1;
@@ -592,7 +665,8 @@ static void escritor() {
             const char* nomb = (o->ch == 'b') ? "Boton" : (o->ch == 'k') ? "Chek"
                              : (o->ch == 's') ? "Slid" : (o->ch == 'l') ? "Txt"
                              : (o->ch == 'p') ? "Pan" : (o->ch == 'c') ? "cbo"
-                             : (o->ch == 'q') ? "Ses" : "Nvo";
+                             : (o->ch == 'q') ? "Ses" : (o->ch == 'm') ? "Cam"
+                             : "Nvo";
             Ser* s = serCr(fol, o->ch, n2, nomb);
             long mx = fol == gRoot ? gW : ccG(fol, CI_W) / QZ;
             long mh = fol == gRoot ? gH : ccG(fol, CI_H) / QZ;
@@ -643,10 +717,18 @@ static void escritor() {
             }
         } else if (o->k == 5) {                  // accion del editor
             if (o->tx) { if (o->tx[0] == 'G') ordP(4, 0, 0,0,0,0,0,0); }
+        } else if (o->k == 6) {                  // alimenta camara 'm'
+            if (o->t && o->tx && o->r[0] > 0 && o->r[1] > 0) {
+                long long* c4 = camRow(o->t, o->r[0], o->r[1]);
+                memcpy((void*)c4[0], o->tx,
+                       (size_t)(o->r[0] * o->r[1]) * sizeof(unsigned int));
+                c4[3]++;
+                o->t->vr++; gGen++;
+            }
         }
-        for (long z = 0; z < 256; z++) oRing[z].tx = 0;
         oTail = oTail + 1;
     }
+    for (long z = 0; z < 256; z++) oRing[z].tx = 0;   // tras drenar todo
 }
 // ---- [I] interaccion (mis para todos) ---------------------------------------
 static Ser* gSel = 0; static Ser* gAnt = 0;   // seleccion actual y previa
@@ -659,8 +741,10 @@ static __attribute__((unused)) void pisaRaton(float mx, float my) {
     if (!s) return;
     gAnt = gSel;
     gSel = s;
-    mandaAlFrente(s);
-    ordP(3, s, 0, 0, 0, 0, 0, 0);
+    if (!(ccG(s, CI_FLG) & 8)) {            // pin: sin frente ni z propio
+        mandaAlFrente(s);
+        ordP(3, s, 0, 0, 0, 0, 0, 0);
+    }
     Ser* f = s->fol;
     float ox = 0, oy = 0;
     for (Ser* p = f; p; p = p->fol) {
@@ -678,7 +762,7 @@ static __attribute__((unused)) void pisaRaton(float mx, float my) {
         if (fr2 < 0) fr2 = 0;
         if (fr2 > 1) fr2 = 1;
         ccS(s, CI_VAL, (long)(fr2 * 1000));
-    } else {
+    } else if (!(ccG(s, CI_FLG) & 8)) {     // pin: inamovible
         gArra = s;
         gDOffX = mx - ox - (float)ccG(s, CI_X) / QZ;
         gDOffY = my - oy - (float)ccG(s, CI_Y) / QZ;
@@ -886,6 +970,16 @@ static void escModelo() {                   // escena de arranque
     f6Add(gForm, 3, (double)CI_ABI, 1.0, 5.0, (double)'b', 3.0);   // abrir -> 1 boton
     f6Add(gForm, 3, (double)CI_ABI, 1.0, 5.0, (double)'k', 3.0);   // + 1 check
     f6Add(gForm, 3, (double)CI_ABI, 1.0, 5.0, (double)'s', 3.0);   // + 1 slider
+    Ser* pm = serCr(gRoot, 'p', "pM", "Cam");     // bezel fijado (primer plano)
+    ccS(pm, CI_X, 640 * QZ); ccS(pm, CI_Y, 20 * QZ);
+    ccS(pm, CI_W, 150 * QZ); ccS(pm, CI_H, 110 * QZ);
+    ccS(pm, CI_R, 0.1f * QZ); ccS(pm, CI_G, 0.12f * QZ); ccS(pm, CI_B, 0.16f * QZ);
+    ccS(pm, CI_A, QZ); ccS(pm, CI_FLG, 1 | 8); ccS(pm, CI_ABI, 1); ccS(pm, CI_RED, 8);
+    Ser* cmi = serCr(pm, 'm', "mC", "Cam");       // camara viva (fila 'x')
+    ccS(cmi, CI_X, 6 * QZ); ccS(cmi, CI_Y, 18 * QZ);
+    ccS(cmi, CI_W, 138 * QZ); ccS(cmi, CI_H, 86 * QZ);
+    ccS(cmi, CI_A, QZ); ccS(cmi, CI_FLG, 1);
+    gCamNodo = cmi;
 }
 
 // ---- [T] pruebas (sin ventana) ------------------------------------------------
@@ -970,6 +1064,41 @@ static void pruebas() {
         ordP(4, 0, 0, 0, 0, 0, 0, 0);       // re-volcado con los hijos meta
         escritor();
     }
+    Ser* pk = serCr(gRoot, 'k', "pk", "pin");   // pin: gana pick estando debajo
+    ccS(pk, CI_X, 8 * QZ); ccS(pk, CI_Y, 8 * QZ);
+    ccS(pk, CI_W, 60 * QZ); ccS(pk, CI_H, 18 * QZ);
+    ccS(pk, CI_FLG, 1 | 8); ccS(pk, CI_RED, 4);
+    Ser* nb = serCr(gRoot, 'b', "nb", "nor");   // normal creado despues (lo tapa)
+    ccS(nb, CI_X, 8 * QZ); ccS(nb, CI_Y, 8 * QZ);
+    ccS(nb, CI_W, 60 * QZ); ccS(nb, CI_H, 18 * QZ);
+    ccS(nb, CI_FLG, 1); ccS(nb, CI_RED, 6);
+    gLinN = 0; listaRec(gRoot);
+    Ser* pp = elige(20, 12);
+    printf("pin gana el pick: %s\n", pp == pk ? "PASA" : "FALLA");
+    pisaRaton(20, 12);
+    printf("pin inamovible sin frente: %s\n",
+           (gArra == 0 && gRoot->A[gRoot->nA - 1] == nb) ? "PASA" : "FALLA");
+    Ser* cam = serCr(gRoot, 'm', "cT", "Cam");   // camara de prueba
+    ccS(cam, CI_X, 40 * QZ); ccS(cam, CI_Y, 300 * QZ);
+    ccS(cam, CI_W, 40 * QZ); ccS(cam, CI_H, 20 * QZ);
+    ccS(cam, CI_FLG, 1);
+    unsigned int fr[8];                        // frame 4x2: azul arriba rojo abajo
+    for (long i = 0; i < 4; i++) fr[i] = 0xff0000ffu;
+    for (long i = 4; i < 8; i++) fr[i] = 0xffff0000u;
+    ordFeed(cam, fr, 4, 2); escritor();
+    pintaTodo();
+    unsigned int cv = gImg[310 * gW + 60];
+    printf("camara muestra frame: %s\n",
+           ((cv >> 16) & 255) == 255 ? "PASA" : "FALLA");
+    gRq = 0; pintaTodo();
+    printf("cache camara sin cambios: %s\n", gRq == 0 ? "PASA" : "FALLA");
+    for (long i = 0; i < 8; i++) fr[i] = 0xff00ff00u;   // todo verde
+    ordFeed(cam, fr, 4, 2); escritor(); pintaTodo();
+    unsigned int cv2 = gImg[310 * gW + 60];
+    printf("camara fuente viva: %s\n",
+           ((cv2 >> 8) & 255) == 255 && !((cv2 >> 16) & 255) ? "PASA" : "FALLA");
+    ordP(4, 0, 0, 0, 0, 0, 0, 0);           // re-volcado con pin y camara
+    escritor();
     printf("seres sin fuga en serccion: %s\n", guardado ? "PASA" : "FALLA");
     long nN = 0;
     FILE* q = fopen(gRuta, "rb");
@@ -1078,6 +1207,17 @@ int PASCAL WinMain(HINSTANCE i, HINSTANCE p, LPSTR c, int s) {
         while (PeekMessageA(&m, 0, 0, 0, 1)) {
             if (m.message == WM_QUIT) return 0;
             TranslateMessage(&m); DispatchMessageA(&m);
+        }
+        if (gCamNodo) {                      // fuente sintetica (camara viva)
+            for (long j = 0; j < 24; j++)
+                for (long i = 0; i < 32; i++) {
+                    long rr = (i * 8 + gCamF) & 255;
+                    long gg = (j * 10 + gCamF * 2) & 255;
+                    gBufCam[j * 32 + i] = pr((float)rr / 255.0f,
+                        (float)gg / 255.0f, 0.6f, 1.0f);
+                }
+            gCamF += 3;
+            ordFeed(gCamNodo, gBufCam, 32, 24);
         }
         escritor();
         pintaTodo();

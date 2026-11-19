@@ -45,7 +45,14 @@ sin ventana) y escribe `ser_check.ppm` 800x520 como render de verificación.
 - Nodo: `struct Ser` con `fol` (padre), `A[]` (hijos, orden = z-order),
   etiqueta `n2[2]` y tipo `tc` char (`r` rect, `p` panel, `b` boton,
   `k` check, `s` slider, `l` texto, `e` editor, `c` contenedor,
-  `o` cubo/textura, `q` sesion).
+  `o` cubo/textura, `q` sesion, `m` camara).
+- Banderas `CI_FLG`: bit 1 visible, bit 2 marcado, bit 4 de editor,
+  **bit 8 = pin**: primer plano (se colan al final del z-order, pick
+  los gana) e inamovible (sin `mandaAlFrente`, sin arrastre).
+- Camara `m`: fila `TM` char `'x'` = `[img,w,h,ver]`. Se alimenta con
+  `ordFeed` (orden `k==6` del escritor). Sin fuente pinta `CAM`.
+  El bezel `Cam` de la escena modelo esta fijado (FLG 1|8) y contiene
+  al control de camara; con ventana corre una fuente sintetica animada.
 - Matrices `M[i]` con identificador `TM[i]` char*: `'f6'` = fila SM
   `[cond,ci,cmp,op,dst,arg]`, `'g'` = cache de campocromatico
   (`long long[4]`: img, w, h, version), `'s'` = texto.
