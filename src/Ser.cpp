@@ -175,7 +175,41 @@ static double* f6Add(Ser* s, double cond, double ci, double cmp,
     f[0] = cond; f[1] = ci; f[2] = cmp; f[3] = op; f[4] = dst; f[5] = arg;
     return f;
 }
+// n9: contador IRR de 9 slots [dst, delta, min, max, resetMin, resetMax,
+//      compMin, compMax, activo]; valor vive en C[dst]. comp: 0=clip,
+//      1=reset, 2=desactivar fila tras el tope.
+static double* n9Add(Ser* s, double dst, double delta, double mn, double mx,
+                     double rmn, double rmx, double cmn, double cmx, double act) {
+    long k = -1;
+    for (long i = 0; i < s->nM; i++) if (!s->M[i] || !s->TM[i]) { k = i; break; }
+    if (k < 0) { k = s->nM; if (k >= s->cM) grC(s, k); s->nM = k + 1; }
+    if (s->M[k]) xMe(s->M[k]);
+    s->M[k] = xM(9 * sizeof(double));
+    s->TM[k] = (char*)"n9";
+    double* n = (double*)s->M[k];
+    n[0] = dst; n[1] = delta; n[2] = mn; n[3] = mx;
+    n[4] = rmn; n[5] = rmx; n[6] = cmn; n[7] = cmx; n[8] = act;
+    return n;
+}
+static void exN9(Ser* s) {                // contadores: delta + topes + reset
+    for (long i = 0; i < s->nM; i++) {
+        if (!s->M[i] || !s->TM[i]) continue;
+        if (s->TM[i][0] != 'n' || s->TM[i][1] != '9') continue;
+        double* n = (double*)s->M[i];
+        long dst = (long)n[0];
+        if (dst < 0 || dst >= CI_MAX) continue;
+        if ((long)n[8] == 0) continue;
+        long v = ccG(s, dst) + (long)n[1];
+        long mn = (long)n[2], mx = (long)n[3];
+        if (mx > mn) {
+            if (v > mx) { v = (long)n[5]; if ((long)n[7] == 2) n[8] = 0; }
+            else if (v < mn) { v = (long)n[4]; if ((long)n[6] == 2) n[8] = 0; }
+        }
+        ccS(s, dst, v);
+    }
+}
 static void exRows(Ser* s) {              // ejecucion de filas SM del nodo
+    exN9(s);
     for (long i = 0; i < s->nM; i++) {
         if (!s->M[i] || !s->TM[i] || s->TM[i][0] != 'f') continue;
         double* f = (double*)s->M[i];
@@ -203,6 +237,11 @@ static void exRows(Ser* s) {              // ejecucion de filas SM del nodo
         else if (op == 4) *d *= arg;
         s->vr++; gGen++;
     }
+}
+static void tickN9(Ser* s) {              // contadores vivos: recorre el arbol
+    if (!s) return;
+    exN9(s);
+    for (long i = 0; i < s->nA; i++) tickN9(s->A[i]);
 }
 
 // ---- [Q] cola de ordenes (GUI -> escritor unico) ----------------------------
@@ -252,6 +291,14 @@ static Ser* gRoot = 0;
 static Ser* gSes  = 0;                  // contenedor de sesiones (ramas q)
 static Ser* gForm = 0;                  // nodo script meta-UI (filas op 5)
 static Ser* gCamNodo = 0;               // camara 'm' alimentada en ventana
+static Ser* gObj = 0;                   // nodo inspeccionado
+static Ser* gInsp = 0;                  // panel inspector (fijado)
+static Ser* gInspEd = 0;                // check modo etiqueta
+static Ser* gInspVis = 0;               // check visible
+static Ser* gInspPn = 0;                // check pin
+static Ser* gInspR = 0; static Ser* gInspG = 0;
+static Ser* gInspB = 0; static Ser* gInspRad = 0;
+static long gEdito = 0;                 // escribiendo etiqueta del objetivo
 __attribute__((unused)) static long gCamF = 0;                  // fase de la fuente
 __attribute__((unused)) static unsigned int gBufCam[32 * 24];   // marco sintetico
 static volatile long gFS = 2;           // escala de texto: celdas por glifo
@@ -725,6 +772,13 @@ static void escritor() {
                         fprintf(f, "V %ld %g %g %g %g %g %g %g\n", p,
                             r6[0], r6[1], r6[2], r6[3], r6[4], r6[5], 0.0);
                     }
+                    for (long m = 0; m < s->nM; m++) {
+                        if (!s->M[m] || !s->TM[m] || s->TM[m][0] != 'n') continue;
+                        double* r9 = (double*)s->M[m];
+                        fprintf(f, "W %ld", p);
+                        for (long c = 0; c < 9; c++) fprintf(f, " %g", r9[c]);
+                        fprintf(f, "\n");
+                    }
                     for (long i = 0; i < s->nA; i++) {
                         if (!s->A[i]) continue;
                         if (idx < 1024) { lin[idx] = s->A[i]; folto[idx] = p; idx++; }
@@ -738,6 +792,20 @@ static void escritor() {
             }
         } else if (o->k == 5) {                  // accion del editor
             if (o->tx) { if (o->tx[0] == 'G') ordP(4, 0, 0,0,0,0,0,0); }
+        } else if (o->k == 7) {                  // z: 0 al fondo, 1/2 un paso
+            Ser* s = o->t; Ser* f = s ? s->fol : 0;
+            long k = -1;
+            for (long i = 0; f && i < f->nA; i++) if (f->A[i] == s) { k = i; break; }
+            if (k >= 0) {
+                if (o->r[0] == 0 && k > 0) {
+                    for (long i = k; i > 0; i--) f->A[i] = f->A[i - 1];
+                    f->A[0] = s; gGen++;
+                } else if (o->r[0] == 1 && k < f->nA - 1) {
+                    f->A[k] = f->A[k + 1]; f->A[k + 1] = s; gGen++;
+                } else if (o->r[0] == 2 && k > 0) {
+                    f->A[k] = f->A[k - 1]; f->A[k - 1] = s; gGen++;
+                }
+            }
         } else if (o->k == 6) {                  // alimenta camara 'm'
             if (o->t && o->tx && o->r[0] > 0 && o->r[1] > 0) {
                 long long* c4 = camRow(o->t, o->r[0], o->r[1]);
@@ -757,11 +825,43 @@ static Ser* gArra = 0;               // nodo arrastrado
 static float gDOffX, gDOffY;          // anclaje del arrastre
 static int   gSlid = 0;               // arrastrando un slider
 
+static void inspAplica(Ser* sl) {        // slider del inspector -> objetivo
+    if (!gObj || !sl || sl->fol != gInsp) return;
+    long ch = ccG(sl, CI_EXT);
+    long vr = ccG(sl, CI_VAL);
+    if (ch == CI_RED) ccS(gObj, CI_RED, vr * 30 / 1000);
+    else if (ch >= CI_R && ch <= CI_B) ccS(gObj, ch, vr * QZ / 1000);
+}
+
+static void syncInsp() {                 // inspector refleja al objetivo
+    if (!gObj || !gInsp) return;
+    ccS(gObj, CI_SEL, 1);
+    if (gInspR) ccS(gInspR, CI_VAL, ccG(gObj, CI_R) * 1000 / QZ);
+    if (gInspG) ccS(gInspG, CI_VAL, ccG(gObj, CI_G) * 1000 / QZ);
+    if (gInspB) ccS(gInspB, CI_VAL, ccG(gObj, CI_B) * 1000 / QZ);
+    if (gInspRad) ccS(gInspRad, CI_VAL, ccG(gObj, CI_RED) * 1000 / 30);
+    if (gInspVis) {
+        long fl = ccG(gInspVis, CI_FLG);
+        ccS(gInspVis, CI_FLG, (ccG(gObj, CI_FLG) & 1) ? (fl | 2) : (fl & ~2));
+    }
+    if (gInspPn) {
+        long fl = ccG(gInspPn, CI_FLG);
+        ccS(gInspPn, CI_FLG, (ccG(gObj, CI_FLG) & 8) ? (fl | 2) : (fl & ~2));
+    }
+}
+
 static __attribute__((unused)) void pisaRaton(float mx, float my) {
     Ser* s = elige(mx, my);
     if (!s) return;
     gAnt = gSel;
     gSel = s;
+    long enI = 0;
+    for (Ser* p = s; p; p = p->fol) if (p == gInsp) { enI = 1; break; }
+    if (!enI) {                              // fuera del inspector: nuevo objetivo
+        if (gObj && gObj != s) ccS(gObj, CI_SEL, 0);
+        gObj = s;
+        syncInsp();
+    }
     if (!(ccG(s, CI_FLG) & 8)) {            // pin: sin frente ni z propio
         mandaAlFrente(s);
         ordP(3, s, 0, 0, 0, 0, 0, 0);
@@ -790,6 +890,13 @@ static __attribute__((unused)) void pisaRaton(float mx, float my) {
     }
     if (s->tc == 'b') ccS(s, CI_EXT, 1);
     if (s->tc == 'k') ccS(s, CI_FLG, ccG(s, CI_FLG) ^ 2);
+    if (s == gInspVis && gObj)             // inspector escribe al objetivo
+        ccS(gObj, CI_FLG, (ccG(s, CI_FLG) & 2) ? (ccG(gObj, CI_FLG) | 1)
+                                               : (ccG(gObj, CI_FLG) & ~1));
+    if (s == gInspPn && gObj)
+        ccS(gObj, CI_FLG, (ccG(s, CI_FLG) & 2) ? (ccG(gObj, CI_FLG) | 8)
+                                               : (ccG(gObj, CI_FLG) & ~8));
+    if (s == gInspEd) gEdito = (ccG(s, CI_FLG) & 2) ? 1 : 0;
     if (s->tc == 'p') ccS(s, CI_ABI, ccG(s, CI_ABI) ^ 1);
     if (s->tc == 'e') {
         long v = ccG(s, CI_VAL);
@@ -806,6 +913,38 @@ static __attribute__((unused)) void pisaRaton(float mx, float my) {
 static __attribute__((unused)) void sueltoRaton() { gArra = 0; gSlid = 0; }
 static __attribute__((unused)) void tecla(char k) {
     if (k == 0) return;
+    if (gEdito && gObj) {                    // edicion de etiqueta
+        long n = 0; if (gObj->lb) while (gObj->lb[n]) n++;
+        if (k == 8 && n > 0) { gObj->lb[n - 1] = 0; gObj->vr++; gGen++; }
+        else if (k >= 32 && k < 127 && n < 60) {
+            if (k >= 'a' && k <= 'z') k = (char)(k - 32);   // glifos 3x5
+            char* nv = (char*)xM((unsigned long)(n + 2));
+            for (long i = 0; i <= n; i++) nv[i] = gObj->lb[i];
+            xMe(gObj->lb);
+            nv[n] = k; nv[n + 1] = 0;
+            gObj->lb = nv;
+            gObj->vr++; gGen++;
+        }
+        return;
+    }
+    if (k == 'L') {                          // modo etiqueta
+        gEdito = !gEdito;
+        if (gInspEd && gEdito == ((ccG(gInspEd, CI_FLG) & 2) ? 0 : 1))
+            ccS(gInspEd, CI_FLG, ccG(gInspEd, CI_FLG) ^ 2);
+    }
+    if (gObj) {
+        if (k == 'V') ccS(gObj, CI_FLG, ccG(gObj, CI_FLG) ^ 1);
+        if (k == 'P') ccS(gObj, CI_FLG, ccG(gObj, CI_FLG) ^ 8);
+        if (k == 'F') ordP(3, gObj, 0, 0, 0, 0, 0, 0);
+        if (k == 'B') ordP(7, gObj, 0, 0, 0, 0, 0, 0);
+        if (k == 'Z') ordP(7, gObj, 1, 0, 0, 0, 0, 0);
+        if (k == 'X') ordP(7, gObj, 2, 0, 0, 0, 0, 0);
+        if (k == 'D') {
+            ordP(2, gObj, 0, 0, 0, 0, 0, 0);
+            if (gObj->fol == gInsp) gObj = 0;
+        }
+        exRows(gObj);
+    }
     if (gSel) exRows(gSel);
 }
 
@@ -889,6 +1028,14 @@ static __attribute__((unused)) long desEscena(const char* ruta) {
             leeNum(lin, 7, &c5);
             if (idx >= 0 && idx < np) 
                 f6Add(prev[(long)idx], c0, c1, c2, c3, c4, c5);
+        } else if (lin[0] == 'W') {              // contador n9 persistido
+            float idx = 0;
+            double n[9];
+            leeNum(lin, 1, &idx);
+            for (long c = 0; c < 9; c++) { float nv = 0; leeNum(lin, 2 + c, &nv); n[c] = nv; }
+            if (idx >= 0 && idx < np)
+                n9Add(prev[(long)idx], n[0], n[1], n[2], n[3], n[4], n[5],
+                      n[6], n[7], n[8]);
         }
     }
     xMe(prev);
@@ -935,6 +1082,8 @@ static void escModelo() {                   // escena de arranque
     ccS(cb, CI_R, 0.6f * QZ); ccS(cb, CI_G, 0.2f * QZ); ccS(cb, CI_B, 0.5f * QZ);
     ccS(cb, CI_A, QZ); ccS(cb, CI_FLG, 1); ccS(cb, CI_VAL, 128); ccS(cb, CI_RED, 0);
     f6Add(cb, 0, (double)CI_VAL, 0.0, 1.0, (double)CI_VAL, (double)QZ);
+    n9Add(cb, (double)CI_VAL, 12.0, 0.0, 256.0, 0.0, 0.0, 0.0, 1.0, 1.0);
+                                  // contadores: pulsa con topes y reset
     Ser* rail = serCr(gRoot, 'o', "rE", "Rail");
     ccS(rail, CI_X, 600 * QZ); ccS(rail, CI_Y, 380 * QZ);
     ccS(rail, CI_W, 180 * QZ); ccS(rail, CI_H, 120 * QZ);
@@ -1008,6 +1157,63 @@ static void escModelo() {                   // escena de arranque
     ccS(cmi, CI_W, 138 * QZ); ccS(cmi, CI_H, 86 * QZ);
     ccS(cmi, CI_A, QZ); ccS(cmi, CI_FLG, 1);
     gCamNodo = cmi;
+    gInsp = serCr(gRoot, 'p', "iN", "Inspect");   // inspector fijado
+    ccS(gInsp, CI_X, 16 * QZ); ccS(gInsp, CI_Y, 244 * QZ);
+    ccS(gInsp, CI_W, 260 * QZ); ccS(gInsp, CI_H, 116 * QZ);
+    ccS(gInsp, CI_R, 0.13f * QZ); ccS(gInsp, CI_G, 0.11f * QZ);
+    ccS(gInsp, CI_B, 0.19f * QZ);
+    ccS(gInsp, CI_A, QZ); ccS(gInsp, CI_FLG, 1 | 8); ccS(gInsp, CI_ABI, 1);
+    ccS(gInsp, CI_RED, 8);
+    gInspEd = serCr(gInsp, 'k', "eD", "Ed");
+    ccS(gInspEd, CI_X, 8 * QZ); ccS(gInspEd, CI_Y, 20 * QZ);
+    ccS(gInspEd, CI_W, 36 * QZ); ccS(gInspEd, CI_H, 18 * QZ);
+    ccS(gInspEd, CI_R, 0.3f * QZ); ccS(gInspEd, CI_G, 0.3f * QZ);
+    ccS(gInspEd, CI_B, 0.4f * QZ);
+    ccS(gInspEd, CI_A, QZ); ccS(gInspEd, CI_FLG, 1); ccS(gInspEd, CI_RED, 4);
+    gInspVis = serCr(gInsp, 'k', "vI", "Vi");
+    ccS(gInspVis, CI_X, 52 * QZ); ccS(gInspVis, CI_Y, 20 * QZ);
+    ccS(gInspVis, CI_W, 36 * QZ); ccS(gInspVis, CI_H, 18 * QZ);
+    ccS(gInspVis, CI_R, 0.3f * QZ); ccS(gInspVis, CI_G, 0.3f * QZ);
+    ccS(gInspVis, CI_B, 0.4f * QZ);
+    ccS(gInspVis, CI_A, QZ); ccS(gInspVis, CI_FLG, 1); ccS(gInspVis, CI_RED, 4);
+    gInspPn = serCr(gInsp, 'k', "pI2", "Pn");
+    ccS(gInspPn, CI_X, 96 * QZ); ccS(gInspPn, CI_Y, 20 * QZ);
+    ccS(gInspPn, CI_W, 36 * QZ); ccS(gInspPn, CI_H, 18 * QZ);
+    ccS(gInspPn, CI_R, 0.3f * QZ); ccS(gInspPn, CI_G, 0.3f * QZ);
+    ccS(gInspPn, CI_B, 0.4f * QZ);
+    ccS(gInspPn, CI_A, QZ); ccS(gInspPn, CI_FLG, 1); ccS(gInspPn, CI_RED, 4);
+    gInspRad = serCr(gInsp, 's', "aI2", "Rad");
+    ccS(gInspRad, CI_X, 140 * QZ); ccS(gInspRad, CI_Y, 21 * QZ);
+    ccS(gInspRad, CI_W, 110 * QZ); ccS(gInspRad, CI_H, 16 * QZ);
+    ccS(gInspRad, CI_R, 0.6f * QZ); ccS(gInspRad, CI_G, 0.4f * QZ);
+    ccS(gInspRad, CI_B, 0.1f * QZ);
+    ccS(gInspRad, CI_A, QZ); ccS(gInspRad, CI_FLG, 1|4);
+    ccS(gInspRad, CI_EXT, CI_RED); ccS(gInspRad, CI_RED, 6);
+    gInspR = serCr(gInsp, 's', "rI", "R");
+    ccS(gInspR, CI_X, 8 * QZ); ccS(gInspR, CI_Y, 46 * QZ);
+    ccS(gInspR, CI_W, 110 * QZ); ccS(gInspR, CI_H, 16 * QZ);
+    ccS(gInspR, CI_R, 0.8f * QZ); ccS(gInspR, CI_G, 0.2f * QZ);
+    ccS(gInspR, CI_B, 0.2f * QZ);
+    ccS(gInspR, CI_A, QZ); ccS(gInspR, CI_FLG, 1|4);
+    ccS(gInspR, CI_EXT, CI_R); ccS(gInspR, CI_RED, 6);
+    gInspG = serCr(gInsp, 's', "gI", "G");
+    ccS(gInspG, CI_X, 8 * QZ); ccS(gInspG, CI_Y, 68 * QZ);
+    ccS(gInspG, CI_W, 110 * QZ); ccS(gInspG, CI_H, 16 * QZ);
+    ccS(gInspG, CI_R, 0.2f * QZ); ccS(gInspG, CI_G, 0.8f * QZ);
+    ccS(gInspG, CI_B, 0.2f * QZ);
+    ccS(gInspG, CI_A, QZ); ccS(gInspG, CI_FLG, 1|4);
+    ccS(gInspG, CI_EXT, CI_G); ccS(gInspG, CI_RED, 6);
+    gInspB = serCr(gInsp, 's', "bI", "B");
+    ccS(gInspB, CI_X, 8 * QZ); ccS(gInspB, CI_Y, 90 * QZ);
+    ccS(gInspB, CI_W, 110 * QZ); ccS(gInspB, CI_H, 16 * QZ);
+    ccS(gInspB, CI_R, 0.2f * QZ); ccS(gInspB, CI_G, 0.3f * QZ);
+    ccS(gInspB, CI_B, 0.9f * QZ);
+    ccS(gInspB, CI_A, QZ); ccS(gInspB, CI_FLG, 1|4);
+    ccS(gInspB, CI_EXT, CI_B); ccS(gInspB, CI_RED, 6);
+    Ser* im = serCr(gInsp, 'l', "mI", "L: edita  V/P Z/X B/F");
+    ccS(im, CI_X, 140 * QZ); ccS(im, CI_Y, 48 * QZ);
+    ccS(im, CI_R, QZ); ccS(im, CI_G, QZ); ccS(im, CI_B, QZ); ccS(im, CI_A, QZ);
+    ccS(im, CI_FLG, 1);
 }
 
 // ---- [T] pruebas (sin ventana) ------------------------------------------------
@@ -1106,8 +1312,8 @@ static void pruebas() {
     pisaRaton(20, 12);
     printf("pin inamovible sin frente: %s\n",
            (gArra == 0 && gRoot->A[gRoot->nA - 1] == nb) ? "PASA" : "FALLA");
-    Ser* cam = serCr(gRoot, 'm', "cT", "Cam");   // camara de prueba
-    ccS(cam, CI_X, 40 * QZ); ccS(cam, CI_Y, 300 * QZ);
+    Ser* cam = serCr(gRoot, 'm', "cT", "Cam");   // camara de prueba (zona libre:
+    ccS(cam, CI_X, 40 * QZ); ccS(cam, CI_Y, 460 * QZ);   // el inspector pin tapa)
     ccS(cam, CI_W, 40 * QZ); ccS(cam, CI_H, 20 * QZ);
     ccS(cam, CI_FLG, 1);
     unsigned int fr[8];                        // frame 4x2: azul arriba rojo abajo
@@ -1115,16 +1321,78 @@ static void pruebas() {
     for (long i = 4; i < 8; i++) fr[i] = 0xffff0000u;
     ordFeed(cam, fr, 4, 2); escritor();
     pintaTodo();
-    unsigned int cv = gImg[310 * gW + 60];
+    unsigned int cv = gImg[470 * gW + 60];
     printf("camara muestra frame: %s\n",
            ((cv >> 16) & 255) == 255 ? "PASA" : "FALLA");
     gRq = 0; pintaTodo();
     printf("cache camara sin cambios: %s\n", gRq == 0 ? "PASA" : "FALLA");
     for (long i = 0; i < 8; i++) fr[i] = 0xff00ff00u;   // todo verde
     ordFeed(cam, fr, 4, 2); escritor(); pintaTodo();
-    unsigned int cv2 = gImg[310 * gW + 60];
+    unsigned int cv2 = gImg[470 * gW + 60];
     printf("camara fuente viva: %s\n",
            ((cv2 >> 8) & 255) == 255 && !((cv2 >> 16) & 255) ? "PASA" : "FALLA");
+    Ser* z1 = serCr(gRoot, 'b', "z1", "z1");
+    Ser* z2 = serCr(gRoot, 'b', "z2", "z2");
+    Ser* z3 = serCr(gRoot, 'b', "z3", "z3");
+    long nz = gRoot->nA;
+    long iz1 = -1, iz2 = -1, iz3 = -1;       //.indices reales: A[] puede tener
+    for (long i = 0; i < nz; i++) {           //huecos reciclados, no contiguos
+        if (gRoot->A[i] == z1) iz1 = i;
+        else if (gRoot->A[i] == z2) iz2 = i;
+        else if (gRoot->A[i] == z3) iz3 = i;
+    }
+    ordP(7, z3, 0, 0, 0, 0, 0, 0); escritor();   // z3 al fondo
+    printf("z: orden inicial (A[]): %s (%ld,%ld,%ld de %ld)\n",
+           (iz1 >= 0 && iz2 > iz1 && iz3 > iz2) ? "PASA" : "FALLA",
+           iz1, iz2, iz3, nz);
+    ordP(7, z3, 0, 0, 0, 0, 0, 0); escritor();   // z3 al fondo (indice 0)
+    printf("z: al fondo: %s\n",
+           (gRoot->A[0] == z3) ? "PASA" : "FALLA");
+    ordP(7, z3, 1, 0, 0, 0, 0, 0); escritor();   // un paso adelante
+    printf("z: un paso adelante: %s\n",
+           (gRoot->A[1] == z3) ? "PASA" : "FALLA");
+    ordP(7, z3, 2, 0, 0, 0, 0, 0); escritor();   // un paso atras
+    printf("z: un paso atras: %s\n",
+           (gRoot->A[0] == z3) ? "PASA" : "FALLA");
+    if (gInsp && gInspR) {                       // inspector: objetivo y teclas
+        Ser* tb = serCr(gRoot, 'b', "tI", "Tgt");
+        ccS(tb, CI_X, 700 * QZ); ccS(tb, CI_Y, 460 * QZ);
+        ccS(tb, CI_W, 80 * QZ); ccS(tb, CI_H, 24 * QZ);
+        ccS(tb, CI_R, QZ / 2); ccS(tb, CI_FLG, 1); ccS(tb, CI_RED, 8);
+        gObj = tb; syncInsp();
+        printf("inspector sigue al objetivo: %s (SEL=%ld R=%ld)\n",
+               (ccG(tb, CI_SEL) == 1 && ccG(gInspR, CI_VAL) == 500)
+               ? "PASA" : "FALLA", ccG(tb, CI_SEL), ccG(gInspR, CI_VAL));
+        ccS(gInspG, CI_VAL, 500);
+        inspAplica(gInspG);
+        printf("inspector color por slider: %s (G=%ld)\n",
+               ccG(tb, CI_G) == 128 ? "PASA" : "FALLA", ccG(tb, CI_G));
+        tecla('P');
+        printf("inspector pin por tecla: %s (FLG=%ld)\n",
+               (ccG(tb, CI_FLG) & 8) ? "PASA" : "FALLA", ccG(tb, CI_FLG));
+        pisaRaton(68, 264);                 // clic real sobre check Vi
+        printf("inspector visible por check: %s (FLG=%ld)\n",
+               (ccG(tb, CI_FLG) & 1) ? "FALLA" : "PASA", ccG(tb, CI_FLG));
+    }
+    Ser* c9 = serCr(gRoot, 's', "c9", "c9");   // contador n9 con tope y reset
+    ccS(c9, CI_X, 700 * QZ); ccS(c9, CI_Y, 490 * QZ);
+    ccS(c9, CI_W, 80 * QZ); ccS(c9, CI_H, 16 * QZ);
+    ccS(c9, CI_FLG, 1); ccS(c9, CI_VAL, 0);
+    n9Add(c9, (double)CI_VAL, 100.0, 0.0, 700.0, 0.0, 0.0, 0.0, 1.0, 1.0);
+    exN9(c9); exN9(c9); exN9(c9); exN9(c9); exN9(c9);
+    long v9a = ccG(c9, CI_VAL);
+    for (long i = 0; i < 3; i++) exN9(c9);
+    long v9b = ccG(c9, CI_VAL);
+    printf("contador n9 delta y tope: %s (500 -> %ld)\n",
+           v9a == 500 && v9b == 0 ? "PASA" : "FALLA", v9b);
+    Ser* e1 = serCr(gRoot, 'b', "e1", "");
+    ccS(e1, CI_FLG, 1); ccS(e1, CI_X, QZ); ccS(e1, CI_Y, 495 * QZ);
+    gObj = e1; gEdito = 1;
+    tecla('Q'); tecla('W'); tecla(8);
+    printf("edicion de etiqueta: %s (lb=%s)\n",
+           e1->lb && e1->lb[0] == 'Q' && e1->lb[1] == 0 ? "PASA" : "FALLA",
+           e1->lb ? e1->lb : "-");
+    gEdito = 0;
     ordP(4, 0, 0, 0, 0, 0, 0, 0);           // re-volcado con pin y camara
     escritor();
     printf("seres sin fuga en serccion: %s\n", guardado ? "PASA" : "FALLA");
@@ -1215,6 +1483,7 @@ static LRESULT CALLBACK wnProc(HWND v, UINT m, WPARAM w, LPARAM l) {
                 if (fr < 0) fr = 0;
                 if (fr > 1) fr = 1;
                 ccS(gSel, CI_VAL, (long)(fr * 1000));
+                inspAplica(gSel);
             }
         }
         return 0; }
@@ -1280,6 +1549,7 @@ int PASCAL WinMain(HINSTANCE i, HINSTANCE p, LPSTR c, int s) {
             ordFeed(gCamNodo, gBufCam, 32, 24);
         }
         escritor();
+        tickN9(gRoot);                       // contadores vivos por cuadro
         pintaTodo();
         SetDIBitsToDevice(gHdc, 0, 0, gW, gH, 0, 0, 0, gH, gImg, &bi, 0);
         Sleep(16);

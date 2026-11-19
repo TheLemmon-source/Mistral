@@ -25,6 +25,27 @@ y un slider propios; el tope por `arg` evita duplicados en cada
 reapertura. Eso es el paso previo a formularios en cascada del todo
 scriptados (hoy el editor requiere clics para crear controles).
 
+## Inspector
+
+El panel fijado `Inspect` presenta el nodo objetivo `gObj` (se sigue con un
+clic sobre cualquier control, no solo seleccion estetica) como campos
+editables: sliders r/g/b/redondeo que escriben al objetivo, checks `Vi`
+(visible) y `Pn` (pin), check `Ed` (modo etiqueta). La tecla `L` abate el
+modo etiqueta: escribir agrega caracteres al `lb` del objetivo (mayusculas,
+retroceso borra). Atajos con objetivo: `V` visible, `P` pin, `F` al frente,
+`B` al fondo, `Z` un paso adelante, `X` un paso atras, `D` borrar.
+
+## Contadores (9 slots)
+
+Fila `TM` char `'n9'`: **9 doubles** `[dst, delta, min, max, resetMin,
+resetMax, compMin, compMax, activo]` – la convencion IRR completa:
+valor en `C[dst]`, `delta` por tic, topes con resets especificos
+(al pisar `max` v = `resetMax`; al pisar `min` v = `resetMin`),
+`compMin`/`compMax` (1 = reset, 2 = desactivar la fila) y `activo`
+(la fila apagada no avanza). `n9Add` la anexa; `tickN9` recorre el arbol
+por frame, asi los contadores avanzan solos en ventana. Persisten como
+lineas `W idx + 9 doubles` en `oroga.dbg`.
+
 ## Compilar
 
 Con GCC (MinGW64 en Windows):
@@ -62,11 +83,15 @@ sin ventana) y escribe `ser_check.ppm` 800x520 como render de verificación.
   meta-UI: filas de condicion/asignacion que generan controles.
   Ejemplo: `f6Add(p, 3, CI_ABI, 1, 5, 'b', 3)` despliega un boton
   la primera vez que el panel abre.
+- Z-order multiple: op `7` del escritor con `r[0]`: 0 = al fondo
+  (shift a `A[0]`), 1 = un paso adelante, 2 = un paso atras (swaps).
+  El viejo "al frente" sigue siendo op `3`.
 - Counters en `volatile long`; escritor unico drena `oRing[256]`
   (`oHead`/`oTail` volatiles).
 - Persistencia: serializacion `N idx fol tc label x y w h r g b a abi flg val`
   y `V idx c0..c5` (los 6 double con `%g`, sin truncado), round-trip
-  verificado por prueba (incluye `CI_VAL` y con decimales). La linea
+  verificado por prueba (incluye `CI_VAL` y con decimales), mas
+  `W idx + 9 doubles` para contadores `n9`. La linea
   `N ... -1` mapea a la raiz ya existente (no duplica). **Autosave**:
   al cerrar la ventana (`WM_DESTROY`) se volca `oroga.dbg` con la
   sesion completa. Recortes con aviso en stderr: arbol > 1024 nodos,
