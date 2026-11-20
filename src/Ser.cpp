@@ -551,10 +551,15 @@ static long long* camRow(Ser* s, long w, long h) {   // crea/ajusta fila 'x'
     if (k < 0) { k = s->nM; if (k >= s->cM) grC(s, k); s->nM = k + 1;
                  s->TM[k] = (char*)"x"; s->M[k] = 0; }
     long long* c4 = (long long*)s->M[k];
+    if (w < 1) w = 1;         // LLP64: producto en long de 32 bits
+    if (w > 2048) w = 2048;   // desborda a negativo: tope, no crash
+    if (h < 1) h = 1;
+    if (h > 2048) h = 2048;
     if (!c4 || c4[1] != w || c4[2] != h) {
         if (c4) xMe((void*)c4[0]);
-        unsigned int* im = (unsigned int*)xM((unsigned long)(w * h) * sizeof(unsigned int));
-        memset(im, 0, (size_t)(w * h) * sizeof(unsigned int));
+        size_t nt = (size_t)w * (size_t)h;
+        unsigned int* im = (unsigned int*)xM(nt * sizeof(unsigned int));
+        memset(im, 0, nt * sizeof(unsigned int));
         if (!c4) c4 = (long long*)xM(4 * sizeof(long long));
         c4[0] = (long long)im; c4[1] = w; c4[2] = h; c4[3] = 0;
         s->M[k] = c4;
@@ -728,11 +733,14 @@ static long extW(Ser* s) {               // bloque alcanzado por la rama
     long lt = 0; while (s->lb && s->lb[lt]) lt++;
     long tw = 14 + lt * 5;
     if (tw > w) w = tw;
+    if (w < 1) w = 1;                    // datos corruptos: tope, no crash
+    if (w > 2048) w = 2048;
     return w + 6;
 }
 static long extH(Ser* s) {
     long h = ccG(s, CI_H) / QZ;
     if (h < 16) h = 16;
+    if (h > 2048) h = 2048;
     return h + 6;
 }
 static long long* cacheRow(Ser* s, long w, long h) {   // M fila 'g': [img,w,h,vv]
@@ -742,12 +750,17 @@ static long long* cacheRow(Ser* s, long w, long h) {   // M fila 'g': [img,w,h,v
     if (k < 0) { k = s->nM; if (k >= s->cM) grC(s, k); s->nM = k + 1;
                  s->TM[k] = (char*)"g"; s->M[k] = 0; }
     long long* c4 = (long long*)s->M[k];
+    if (w < 1) w = 1;             // LLP64: el producto en long de
+    if (w > 2048) w = 2048;       // 32 bits desborda a negativo
+    if (h < 1) h = 1;
+    if (h > 2048) h = 2048;
     if (!c4 || c4[1] < w || c4[2] < h) {
         long nw = (c4 && c4[1] > w) ? (long)c4[1] : w;
         long nh = (c4 && c4[2] > h) ? (long)c4[2] : h;
         if (c4) xMe((void*)c4[0]);
-        unsigned int* im = (unsigned int*)xM((unsigned long)(nw * nh) * sizeof(unsigned int));
-        memset(im, 0, (size_t)(nw * nh) * sizeof(unsigned int));
+        size_t nt = (size_t)nw * (size_t)nh;
+        unsigned int* im = (unsigned int*)xM(nt * sizeof(unsigned int));
+        memset(im, 0, nt * sizeof(unsigned int));
         c4 = (long long*)xM(4 * sizeof(long long));
         c4[0] = (long long)im; c4[1] = nw; c4[2] = nh; c4[3] = -1;
         s->M[k] = c4;
@@ -927,11 +940,12 @@ static void escritor() {
                 lin[idx] = gRoot; folto[idx] = -1; idx++;
                 for (long p = 0; p < idx && p < 1024; p++) {
                     Ser* s = lin[p];
-                    fprintf(f, "N %ld %ld %c %s %ld %ld %ld %ld %ld %ld %ld %ld %ld %ld %ld\n",
-                        p, folto[p], s->tc, s->lb,
+                    fprintf(f, "N %ld %ld %c %ld %ld %ld %ld %ld %ld %ld %ld %ld %ld %ld %s\n",
+                        p, folto[p], s->tc,
                         ccG(s, CI_X), ccG(s, CI_Y), ccG(s, CI_W), ccG(s, CI_H),
                         ccG(s, CI_R), ccG(s, CI_G), ccG(s, CI_B), ccG(s, CI_A),
-                        ccG(s, CI_ABI), ccG(s, CI_FLG), ccG(s, CI_VAL));
+                        ccG(s, CI_ABI), ccG(s, CI_FLG), ccG(s, CI_VAL),
+                        s->lb ? s->lb : "");   // etiqueta AL FINAL: espacios seguros
                     for (long m = 0; m < s->nM; m++) {
                         if (!s->M[m] || !s->TM[m] || s->TM[m][0] != 'f') continue;
                         double* r6 = (double*)s->M[m];
@@ -1209,13 +1223,13 @@ static __attribute__((unused)) long desEscena(const char* ruta) {
             char nomb[256];
             leeNum(lin, 2, &fol);
             leeNum(lin, 3, &tc);
-            campoTxt(lin, 4, nomb, sizeof(nomb));
-            leeNum(lin, 5, &x);  leeNum(lin, 6, &y);
-            leeNum(lin, 7, &w);  leeNum(lin, 8, &h);
-            leeNum(lin, 9, &r);  leeNum(lin, 10, &g);
-            leeNum(lin, 11, &b); leeNum(lin, 12, &a);
-            leeNum(lin, 13, &ab); leeNum(lin, 14, &fl);
-            leeNum(lin, 15, &vv);                       // CI_VAL persistido
+            leeNum(lin, 4, &x);  leeNum(lin, 5, &y);
+            leeNum(lin, 6, &w);  leeNum(lin, 7, &h);
+            leeNum(lin, 8, &r);  leeNum(lin, 9, &g);
+            leeNum(lin, 10, &b); leeNum(lin, 11, &a);
+            leeNum(lin, 12, &ab); leeNum(lin, 13, &fl);
+            leeNum(lin, 14, &vv);                       // CI_VAL persistido
+            campoTxt(lin, 15, nomb, sizeof(nomb));      // etiqueta al final: con espacios
             Ser* s;
             if (fol < 0) {                       // N 0 comandos fol -1: la raiz
                 s = gRoot;                       // ya existe: no duplicar
@@ -1225,10 +1239,10 @@ static __attribute__((unused)) long desEscena(const char* ruta) {
                 Ser* folp = (fol < np) ? prev[(long)fol] : 0;
                 s = serCr(folp ? folp : gRoot, (char)(long)tc, "nd", nomb);
             }
-            ccS(s, CI_X, (long)(x * QZ)); ccS(s, CI_Y, (long)(y * QZ));
-            ccS(s, CI_W, (long)(w * QZ)); ccS(s, CI_H, (long)(h * QZ));
-            ccS(s, CI_R, (long)(r * QZ)); ccS(s, CI_G, (long)(g * QZ));
-            ccS(s, CI_B, (long)(b * QZ)); ccS(s, CI_A, (long)(a * QZ));
+            ccS(s, CI_X, (long)x); ccS(s, CI_Y, (long)y);
+            ccS(s, CI_W, (long)w); ccS(s, CI_H, (long)h);   // el archivo ya es punto fijo: sin *QZ
+            ccS(s, CI_R, (long)r); ccS(s, CI_G, (long)g);
+            ccS(s, CI_B, (long)b); ccS(s, CI_A, (long)a);
             ccS(s, CI_ABI, (long)ab); ccS(s, CI_FLG, (long)fl);
             ccS(s, CI_RED, 6);
             ccS(s, CI_VAL, (long)vv);
@@ -1764,6 +1778,34 @@ static void pruebas() {
         printf("cond fraccionaria sobrevive: %s (%g)\n",
                fila && fila[0] == 0.5 ? "PASA" : "FALLA", fila ? fila[0] : -1.0);
     }
+    ordP(4, 0, 0, 0, 0, 0, 0, 0); escritor();       // etiqueta con espacios:
+    Ser* sp = serCr(gRoot, 'l', "sP", "SEL pin [k] PIN");   // antes corrompia
+    ccS(sp, CI_W, 660 * QZ); ccS(sp, CI_H, 32 * QZ);
+    ccS(sp, CI_X, 16 * QZ); ccS(sp, CI_Y, 486 * QZ);
+    ordP(4, 0, 0, 0, 0, 0, 0, 0); escritor();
+    while (gRoot->nA > 0) {
+        Ser* h = gRoot->A[gRoot->nA - 1];
+        gRoot->nA--;
+        serAl(h);
+    }
+    serAl(gRoot); gRoot = 0;
+    gSes = 0; gForm = 0; gCamNodo = 0; gSel = 0; gAnt = 0; gArra = 0;
+    gInsp = 0; gInspEd = 0; gInspVis = 0; gInspPn = 0;
+    gInspR = 0; gInspG = 0; gInspB = 0; gInspRad = 0;
+    gAyTxt = 0; gObj = 0;
+    desEscena(gRuta);
+    Ser* sp2 = 0;
+    for (long i = 0; gRoot && i < gRoot->nA; i++) {
+        Ser* q2 = gRoot->A[i];
+        if (q2 && q2->lb && strcmp(q2->lb, "SEL pin [k] PIN") == 0) sp2 = q2;
+    }
+    printf("etiqueta con espacios sobrevive: %s (w=%ld h=%ld x=%ld)\n",
+           (sp2 && ccG(sp2, CI_W) == 660 * QZ && ccG(sp2, CI_H) == 32 * QZ
+            && ccG(sp2, CI_X) == 16 * QZ) ? "PASA" : "FALLA",
+           sp2 ? ccG(sp2, CI_W) / QZ : -1, sp2 ? ccG(sp2, CI_H) / QZ : -1,
+           sp2 ? ccG(sp2, CI_X) / QZ : -1);
+    gImgGen = -1; pintaTodo();                   // el camino que crasheaba en Win
+    printf("render tras recarga: %s\n", gImg && gRoot ? "PASA" : "FALLA");
     FILE* o = fopen("ser_check.ppm", "wb");
     if (o) {
         fprintf(o, "P6\n%ld %ld\n255\n", gW, gH);

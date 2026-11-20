@@ -151,11 +151,18 @@ sin ventana) y escribe `ser_check.ppm` 800x520 como render de verificación.
   El viejo "al frente" sigue siendo op `3`.
 - Counters en `volatile long`; escritor unico drena `oRing[256]`
   (`oHead`/`oTail` volatiles).
-- Persistencia: serializacion `N idx fol tc label x y w h r g b a abi flg val`
-  y `V idx c0..c5` (los 6 double con `%g`, sin truncado), round-trip
+- Persistencia: serializacion `N idx fol tc x y w h r g b a abi flg val etiqueta`
+  (la etiqueta va AL FINAL: puede tener espacios sin romper la carga) y
+  `V idx c0..c5` (los 6 double con `%g`, sin truncado), round-trip
   verificado por prueba (incluye `CI_VAL` y con decimales), mas
   `W idx + 9 doubles` para contadores `n9`. La linea
-  `N ... -1` mapea a la raiz ya existente (no duplica). **Autosave**:
+  `N ... -1` mapea a la raiz ya existente (no duplica). Los numeros ya
+  viajan en punto fijo (sin re-escalar al cargar): el desajuste viejo
+  multiplicaba `260*QZ` otra vez al recargar y desbordaba el cache en
+  Win32 (`long` de 32 bits) — corregido y con topes (2048) + aritmetica
+  en `size_t` en cache/camara. **Formato nuevo**: los `oroga.dbg`
+  anteriores al ajuste de lineas NO son compatibles; borralo una vez y
+  la escena modelo se regenera. **Autosave**:
   al cerrar la ventana (`WM_DESTROY`) se volca `oroga.dbg` con la
   sesion completa. Recortes con aviso en stderr: arbol > 1024 nodos,
   colado > 1024, cola `oRing` llena (la orden se pierde, no corrompe).
