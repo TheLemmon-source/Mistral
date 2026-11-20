@@ -1194,6 +1194,17 @@ static long leeNum(const char* l, long idx, float* out) {
     *out = neg ? -acc : acc;
     return 1;
 }
+static long leeNumV(const char* l, long idx, float* out) {
+    long k = 0, w = 0;
+    while (w < idx) {
+        while (l[k] == ' ') k++;
+        while (l[k] && l[k] != ' ') k++;
+        w++;
+    }
+    while (l[k] == ' ') k++;
+    if (!(l[k] >= '0' && l[k] <= '9') && l[k] != '-' && l[k] != '.') return 0;
+    return leeNum(l, idx, out);
+}
 static long campoTxt(const char* l, long idx, char* out, long mx) {
     long k = 0, w = 0;
     while (w < idx) {
@@ -1223,13 +1234,26 @@ static __attribute__((unused)) long desEscena(const char* ruta) {
             char nomb[256];
             leeNum(lin, 2, &fol);
             leeNum(lin, 3, &tc);
-            leeNum(lin, 4, &x);  leeNum(lin, 5, &y);
-            leeNum(lin, 6, &w);  leeNum(lin, 7, &h);
-            leeNum(lin, 8, &r);  leeNum(lin, 9, &g);
-            leeNum(lin, 10, &b); leeNum(lin, 11, &a);
-            leeNum(lin, 12, &ab); leeNum(lin, 13, &fl);
-            leeNum(lin, 14, &vv);                       // CI_VAL persistido
-            campoTxt(lin, 15, nomb, sizeof(nomb));      // etiqueta al final: con espacios
+            long nuevo = leeNumV(lin, 4, &x);
+            if (nuevo) {
+                leeNum(lin, 5, &y);
+                leeNum(lin, 6, &w);  leeNum(lin, 7, &h);
+                leeNum(lin, 8, &r);  leeNum(lin, 9, &g);
+                leeNum(lin, 10, &b); leeNum(lin, 11, &a);
+                leeNum(lin, 12, &ab); leeNum(lin, 13, &fl);
+                leeNum(lin, 14, &vv);                   // CI_VAL persistido
+                campoTxt(lin, 15, nomb, sizeof(nomb));  // etiqueta al final: con espacios
+            } else {
+                campoTxt(lin, 4, nomb, sizeof(nomb));   // formato viejo: etiqueta en campo 4
+                for (long k2 = 0; nomb[k2]; k2++)       // era un solo token: corto en espacio
+                    if (nomb[k2] == ' ') { nomb[k2] = 0; break; }
+                leeNum(lin, 5, &x);  leeNum(lin, 6, &y);
+                leeNum(lin, 7, &w);  leeNum(lin, 8, &h);
+                leeNum(lin, 9, &r);  leeNum(lin, 10, &g);
+                leeNum(lin, 11, &b); leeNum(lin, 12, &a);
+                leeNum(lin, 13, &ab); leeNum(lin, 14, &fl);
+                leeNum(lin, 15, &vv);                   // val al final en la ultima vieja
+            }
             Ser* s;
             if (fol < 0) {                       // N 0 comandos fol -1: la raiz
                 s = gRoot;                       // ya existe: no duplicar
@@ -1806,6 +1830,31 @@ static void pruebas() {
            sp2 ? ccG(sp2, CI_X) / QZ : -1);
     gImgGen = -1; pintaTodo();                   // el camino que crasheaba en Win
     printf("render tras recarga: %s\n", gImg && gRoot ? "PASA" : "FALLA");
+    {                                            // migracion: renglon formato viejo
+        FILE* v = fopen(gRuta, "wb");
+        if (v) {
+            fprintf(v, "N 0 -1 p Dmo 4096 4096 66560 53760 36 41 51 256 1 9 555\n");
+            fclose(v);
+        }
+        while (gRoot->nA > 0) {
+            Ser* h = gRoot->A[gRoot->nA - 1];
+            gRoot->nA--;
+            serAl(h);
+        }
+        serAl(gRoot); gRoot = 0;
+        gSes = 0; gForm = 0; gCamNodo = 0; gSel = 0; gAnt = 0; gArra = 0;
+        gInsp = 0; gInspEd = 0; gInspVis = 0; gInspPn = 0;
+        gInspR = 0; gInspG = 0; gInspB = 0; gInspRad = 0;
+        gAyTxt = 0; gObj = 0;
+        desEscena(gRuta);
+        printf("migracion de formato viejo: %s (x=%ld w=%ld val=%ld lb=%s)\n",
+               (gRoot && ccG(gRoot, CI_X) == 4096 && ccG(gRoot, CI_W) == 66560
+                && ccG(gRoot, CI_VAL) == 555
+                && gRoot->lb && strcmp(gRoot->lb, "Dmo") == 0) ? "PASA" : "FALLA",
+               gRoot ? ccG(gRoot, CI_X) : -1, gRoot ? ccG(gRoot, CI_W) : -1,
+               gRoot ? ccG(gRoot, CI_VAL) : -1,
+               gRoot && gRoot->lb ? gRoot->lb : "(nil)");
+    }
     FILE* o = fopen("ser_check.ppm", "wb");
     if (o) {
         fprintf(o, "P6\n%ld %ld\n255\n", gW, gH);

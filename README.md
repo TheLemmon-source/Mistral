@@ -121,7 +121,7 @@ En Dev-C++ (Proyecto Win32 GUI, C++11) o Makefile.win → target `Ser.o` +
 enlazado con `-luser32 -lgdi32`. Con ventana abre un editor de controles:
 botones, checks, sliders, redondeados, caches, sesiones anidadas.
 
-Sin modificar nada, `main()` corre primero la batería de pruebas (42/42 PASA,
+Sin modificar nada, `main()` corre primero la batería de pruebas (45/45 PASA,
 sin ventana) y escribe `ser_check.ppm` 800x520 como render de verificación.
 
 ## Formato
@@ -160,9 +160,12 @@ sin ventana) y escribe `ser_check.ppm` 800x520 como render de verificación.
   viajan en punto fijo (sin re-escalar al cargar): el desajuste viejo
   multiplicaba `260*QZ` otra vez al recargar y desbordaba el cache en
   Win32 (`long` de 32 bits) — corregido y con topes (2048) + aritmetica
-  en `size_t` en cache/camara. **Formato nuevo**: los `oroga.dbg`
-  anteriores al ajuste de lineas NO son compatibles; borralo una vez y
-  la escena modelo se regenera. **Autosave**:
+  en `size_t` en cache/camara. **Migracion automatica**: los
+  `oroga.dbg` del formato viejo (etiqueta en el campo 4) se detectan
+  solos al cargar y se traducen en el acto — no hace falta borrar el
+  archivo; la primera guardada lo reescribe en formato nuevo
+  (unico caso sin remedio: un archivo corrupto ya re-guardado por la
+  sesion de los puntitos, ahi si borralo una vez). **Autosave**:
   al cerrar la ventana (`WM_DESTROY`) se volca `oroga.dbg` con la
   sesion completa. Recortes con aviso en stderr: arbol > 1024 nodos,
   colado > 1024, cola `oRing` llena (la orden se pierde, no corrompe).
