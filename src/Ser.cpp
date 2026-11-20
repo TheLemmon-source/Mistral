@@ -187,7 +187,7 @@ static void ccS(Ser* s, long i, long v) {
 
 // ---- [U] deshacer: log de asignaciones por grupos ----------------------------
 struct Lg { Ser* t; long g; long ci; long old; char* olb; };
-static struct Lg gLg[128];
+static struct Lg gLg[2048];               // un arrastre gasta 2 por pixel
 static long gLgN = 0;                    // entradas usadas
 static long gLgG = 0;                    // grupo de acciones actual
 
@@ -203,6 +203,42 @@ static void lgE(Ser* t, long ci, long old, char* olb) {
     gLgN++;
 }
 static void borraApuntados(Ser* t);      // escritor limpia colgantes al borrar
+static void serAl(Ser* s);               // Cementerio libera deshaciendo evict
+
+// Cementerio: borrados con vuelta atras. El nodo se deshoja (queda fuera del
+// arbol, no pinta, no pick, no archivo) pero sobrevive hasta 8 borrados.
+static Ser* gCem[8];
+static long gCemN = 0;
+static long deshoja(Ser* s) {
+    Ser* f = s->fol;
+    if (!f) return 0;
+    for (long i = 0; i < f->nA; i++)
+        if (f->A[i] == s) { f->A[i] = 0; return 1; }
+    return 0;
+}
+static void cemaSer(Ser* t) {            // eliminar: deshojar y aparcar
+    deshoja(t);
+    gVivos--;
+    lgE(t, -4, 0, 0);                    // deshacer: resucita aca
+    if (gCemN >= 8) {                    // evict del mas viejo: ya no vuelve
+        Ser* v = gCem[0];
+        for (long i = 0; i < gLgN; i++) if (gLg[i].t == v) gLg[i].t = 0;
+        gVivos++;                        // ya conto el deshoje al aparcar
+        serAl(v);
+        for (long i = 1; i < gCemN; i++) gCem[i - 1] = gCem[i];
+        gCemN--;
+    }
+    gCem[gCemN++] = t;
+}
+static void resucita(Ser* t) {           // volver del cementerio al mismo fol
+    Ser* f = t->fol;
+    if (!f || f->tc == 0) { serAl(t); return; }
+    long k = -1;
+    for (long i = 0; i < f->cA; i++) if (!f->A[i]) { k = i; break; }
+    if (k < 0) { k = f->nA; if (k >= f->cA) grC(f, k); f->nA = k + 1; }
+    f->A[k] = t;
+    gVivos++; gGen++;
+}
 static void deshacer() {                 // repone el ultimo grupo completo
     if (gLgN <= 0) return;
     long g = gLg[gLgN - 1].g;
@@ -210,11 +246,21 @@ static void deshacer() {                 // repone el ultimo grupo completo
     while (i > 0 && gLg[i - 1].g == g) i--;
     for (long j = gLgN - 1; j >= i; j--) {           // en reversa
         Ser* t = gLg[j].t;
-        if (!t || t->tc == 0) { xMe(gLg[j].olb); continue; }
-        if (gLg[j].ci == -2) {                        // etiqueta: se repone
-            if (gLg[j].olb) { xMe(t->lb); t->lb = gLg[j].olb; gLg[j].olb = 0; }
-        } else ccS(t, gLg[j].ci, gLg[j].old);
-        t->vr++; gGen++;
+        long ci = gLg[j].ci;
+        if (!t) { xMe(gLg[j].olb); continue; }
+        if (ci == -3) {                              // nodo creado: se quita
+            if (t->tc != 0) {
+                borraApuntados(t); t->vr++; gGen++; serAl(t);
+            }
+        } else if (ci == -4) {                       // borrado: se resucita
+            if (t->tc != 0) resucita(t);
+        } else {
+            if (t->tc == 0) { xMe(gLg[j].olb); continue; }
+            if (ci == -2) {                          // etiqueta: se repone
+                if (gLg[j].olb) { xMe(t->lb); t->lb = gLg[j].olb; gLg[j].olb = 0; }
+            } else ccS(t, ci, gLg[j].old);
+            t->vr++; gGen++;
+        }
     }
     gLgN = i;
 }
@@ -926,8 +972,170 @@ static void blit(long long* c4, int dx, int dy) { // cache vigente: volcado
             if ((c >> 24) & 255) px(dx + (int)i, dy + (int)j, c);
         }
 }
+// ---- [3D] modo 3D: la escena como tableros en profundidad, misma fila 'x' ----
+// Cada nodo visible es una placa (x,y = su caja; z = -1.1 * nivel): el padre
+// queda detras y los hijos adelante. Camara orbital: arrastre o flechas giran,
+// +/- acerca; un clic elige el tablero (mismo Ser, mismo pick, mismo undo).
+static long g3D = 0;                     // modo 3D activo
+static float g3Az = 0.7f, g3El = 0.55f, g3Zm = 1.0f;   // orbita y zoom
+static void pr3(float x, float y, float z,
+                float* sx, float* sy, float* w3) {   // proyecta un punto mundo
+    float cY = (float)cos((double)g3Az), sY = (float)sin((double)g3Az);
+    float cX = (float)cos((double)g3El), sX = (float)sin((double)g3El);
+    float x2 = x * cY + z * sY;
+    float z2 = -x * sY + z * cY;
+    float y2 = y * cX - z2 * sX;
+    float q3 = y * sX + z2 * cX;
+    if (w3) *w3 = q3;
+    float inv = 1.0f / (q3 + 6.0f);
+    float esc = 180.0f * g3Zm;           // 1:1 en el centro (mundo = px/30)
+    *sx = (float)gW * 0.5f + x2 * inv * esc;
+    *sy = (float)gH * 0.5f - y2 * inv * esc;
+}
+#define G3MAX 256
+static Ser* g3Se[G3MAX];                 // pick: nodo -> centro proyectado
+static float g3Px[G3MAX], g3Py[G3MAX];
+static long g3Nv[G3MAX];
+static long g3N3 = 0;
+static void reco3D(Ser* s, long nivel) {
+    if (!s || s->tc == 0 || nivel > 2 || g3N3 >= G3MAX) return;
+    long fl = ccG(s, CI_FLG);
+    if (s->tc != 'r') {
+        if (!(fl & 1) || ccG(s, CI_W) <= 0) return;
+        g3Se[g3N3] = s;
+        g3Nv[g3N3] = nivel;
+        g3N3++;
+    }
+    for (long i = 0; i < s->nA; i++) reco3D(s->A[i], nivel + 1);
+}
+static Ser* elige3D(float mx, float my) {
+    Ser* r = 0;
+    float bd = 18.0f;
+    for (long i = 0; i < g3N3; i++) {
+        float dx = g3Px[i] - mx, dy = g3Py[i] - my;
+        float d = (float)sqrt((double)(dx * dx + dy * dy));
+        if (d < bd) { bd = d; r = g3Se[i]; }
+    }
+    return r;
+}
+static void pinta3D() {
+    if (!gImg || !gRoot) return;
+    long gFS0 = gFS;
+    gTgt = gImg; gTW = gW; gTH = gH;
+    unsigned int bg = pr(0.05f, 0.06f, 0.09f, 1.0f);
+    for (unsigned long i = 0; i < (unsigned long)gW * (unsigned long)gH; i++)
+        gImg[i] = bg;
+    static const long FF[6][4] = { {0,1,3,2},{4,5,7,6},{0,1,5,4},
+                                   {2,3,7,6},{0,2,6,4},{1,3,7,5} };
+    static const float FN[6][3] = { {0,0,-1},{0,0,1},{0,-1,0},
+                                    {0,1,0},{-1,0,0},{1,0,0} };
+    g3N3 = 0;
+    reco3D(gRoot, 0);
+    long bx0 = 1 << 30, by0 = 1 << 30, bx1 = -(1 << 30), by1 = -(1 << 30);
+    for (long i = 0; i < g3N3; i++) {
+        Ser* t = g3Se[i];
+        long x = ccG(t, CI_X) / QZ, y = ccG(t, CI_Y) / QZ;
+        long w = ccG(t, CI_W) / QZ, h = ccG(t, CI_H) / QZ;
+        if (x < bx0) bx0 = x;
+        if (y < by0) by0 = y;
+        if (x + w > bx1) bx1 = x + w;
+        if (y + h > by1) by1 = y + h;
+    }
+    if (bx1 > bx0 && by1 > by0) {
+        float ccx = (float)(bx0 + bx1) * 0.5f / 30.0f;
+        float ccy = (float)(by0 + by1) * 0.5f / 30.0f;
+        long opos[256];
+        float zz[256];
+        for (long i = 0; i < g3N3; i++) {
+            opos[i] = i;
+            Ser* t = g3Se[i];
+            float wx = ((float)(ccG(t, CI_X) + ccG(t, CI_W) / 2))
+                       / QZ / 30.0f - ccx;
+            float wy = ((float)(ccG(t, CI_Y) + ccG(t, CI_H) / 2))
+                       / QZ / 30.0f - ccy;
+            float qz = 0, sx = 0, sy = 0;
+            pr3(wx, wy, -1.1f * (float)g3Nv[i], &sx, &sy, &qz);
+            zz[i] = qz;
+            g3Px[i] = sx; g3Py[i] = sy;
+        }
+        for (long a = 0; a < g3N3; a++)          // pintor: placas lejos primero
+            for (long b2 = a + 1; b2 < g3N3; b2++)
+                if (zz[opos[b2]] > zz[opos[a]]) {
+                    long sw = opos[a]; opos[a] = opos[b2]; opos[b2] = sw;
+                }
+        for (long oi = 0; oi < g3N3; oi++) {
+            Ser* t = g3Se[opos[oi]];
+            long niv = g3Nv[opos[oi]];
+            float w = (float)ccG(t, CI_W) / QZ;
+            float h = (float)ccG(t, CI_H) / QZ;
+            if (w < 1.0f) w = 1.0f;
+            if (h < 1.0f) h = 1.0f;
+            if (w > 1200.0f) w = 1200.0f;        // placas gigantes: tope
+            if (h > 1200.0f) h = 1200.0f;
+            float hw = w / 60.0f, hh = h / 60.0f, dz = 0.35f;
+            float wx = (float)ccG(t, CI_X) / QZ + hw - ccx;
+            float wy = (float)ccG(t, CI_Y) / QZ + hh - ccy;
+            float wz = -1.1f * (float)niv;
+            float pxc[8], pyc[8], pzc[8];
+            for (long c = 0; c < 8; c++)
+                pr3(wx + ((c & 1) ? hw : -hw), wy + ((c & 2) ? hh : -hh),
+                    wz + ((c & 4) ? dz : -dz),
+                    &pxc[c], &pyc[c], &pzc[c]);
+            float fr = (float)ccG(t, CI_R) / QZ, fg2 = (float)ccG(t, CI_G) / QZ;
+            float fb = (float)ccG(t, CI_B) / QZ;
+            long fo[6] = { 0,1,2,3,4,5 };
+            for (long a = 0; a < 5; a++)          // caras lejos -> cerca
+                for (long b2 = a + 1; b2 < 6; b2++) {
+                    float za = 0, zb = 0;
+                    for (long v = 0; v < 4; v++) {
+                        za += pzc[FF[fo[a]][v]];
+                        zb += pzc[FF[fo[b2]][v]];
+                    }
+                    if (zb > za) { long sw = fo[a]; fo[a] = fo[b2]; fo[b2] = sw; }
+                }
+            for (long fi = 0; fi < 6; fi++) {
+                long f = fo[fi];
+                float nx = FN[f][0], ny = FN[f][1], nz = FN[f][2];
+                float cY = (float)cos((double)g3Az), sY = (float)sin((double)g3Az);
+                float cX = (float)cos((double)g3El), sX = (float)sin((double)g3El);
+                float z2 = -nx * sY + nz * cY;
+                float rz = ny * sX + z2 * cX;
+                float ry = ny * cX - z2 * sX;
+                float sh = 0.35f + 0.65f * (0.4f - rz * 0.7f + 0.6f * ry
+                                            + 0.4f * rz);
+                if (sh < 0.2f) sh = 0.2f;
+                if (sh > 1.0f) sh = 1.0f;
+                unsigned int col = pr(fr * sh, fg2 * sh, fb * sh, 1.0f);
+                long a0 = FF[f][0], a1 = FF[f][1], a2 = FF[f][2], a3 = FF[f][3];
+                triLleno(gImg, gW, gH, pxc[a0], pyc[a0], pxc[a1], pyc[a1],
+                         pxc[a2], pyc[a2], col);
+                triLleno(gImg, gW, gH, pxc[a0], pyc[a0], pxc[a2], pyc[a2],
+                         pxc[a3], pyc[a3], col);
+            }
+        }
+    }
+    gFS = 2;                             // etiquetas: planas, siempre legibles
+    for (long i = 0; i < g3N3; i++) {
+        Ser* t = g3Se[i];
+        char lbm[16];
+        lbm[0] = 0;
+        if (t->lb) {
+            long m2 = 0;
+            while (t->lb[m2] && m2 < 10) { lbm[m2] = t->lb[m2]; m2++; }
+            lbm[m2] = 0;
+        }
+        unsigned int col = (t == gObj) ? pr(1.0f, 0.72f, 0.2f, 1.0f)
+                                       : pr(0.8f, 0.85f, 0.9f, 1.0f);
+        texto(g3Px[i] - 12.0f, g3Py[i] - 4.0f, lbm, col);
+    }
+    texto(8, (float)gH - 12.0f,
+          "3D  G:VUELVE  FLEC:GIRA  +/-:ZOOM  CLIC:ELIGE", pr(0.5f, 0.55f, 0.6f, 1.0f));
+    gFS = gFS0;
+    gImgGen = -1;                        // en 3D se repinta cada frame
+}
 static void pintaTodo() {
     if (!gImg) return;
+    if (g3D) { pinta3D(); return; }      // 3D: vista orbital de la escena
     if (gImgGen == gGen && gCamVisto == gCamVer) return;   // nada cambio en TODO
     gTgt = gImg; gTW = gW; gTH = gH;
     gLinN = 0;
@@ -1068,13 +1276,13 @@ static void escritor() {
             ccS(s, CI_B, 0.85f * QZ); ccS(s, CI_A, QZ);
             ccS(s, CI_RED, 6);
             gNvoX += 30; gNvoY += 14;
+            lgE(s, -3, 0, 0);                    // crear = deshacer lo quita
             f6Add(s, 2, (double)CI_EXT, 0.0, 2.0, (double)CI_FLG, 2.0);
         } else if (o->k == 2) {                  // eliminar
             if (o->t && o->t->tc != 'r') {
-                Ser* f = o->t->fol;
+                cemaSer(o->t);                  // cementerio: U lo resucita
                 borraApuntados(o->t);           // sin nodos fantasma (crash editar)
-                serAl(o->t);
-                if (f) gGen++;
+                gGen++;
             }
         } else if (o->k == 3) {                  // mando al frente (z)
             if (o->t) mandaAlFrente(o->t);
@@ -1214,6 +1422,18 @@ static void syncInsp() {                 // inspector refleja al objetivo
 }
 
 static __attribute__((unused)) void pisaRaton(float mx, float my) {
+    if (g3D) {                           // 3D: clic elige el tablero
+        lgEmp();
+        Ser* s = elige3D(mx, my);
+        if (s) {
+            gAnt = gSel;
+            gSel = s;
+            if (gObj && gObj != s) ccS(gObj, CI_SEL, 0);
+            gObj = s;
+            syncInsp();
+        }
+        return;
+    }
     Ser* s = elige(mx, my);
     if (!s) return;
     ratonMundo(s, mx, my, &mx, &my);         // pin: pantalla / resto: mundo
@@ -1311,6 +1531,11 @@ static __attribute__((unused)) void tecla(char k) {
         gEdito = !gEdito;
         if (gInspEd && gEdito == ((ccG(gInspEd, CI_FLG) & 2) ? 0 : 1))
             ccS(gInspEd, CI_FLG, ccG(gInspEd, CI_FLG) ^ 2);
+    }
+    if (k == 'G') { g3D = !g3D; gImgGen = -1; return; }   // G: modo 3D
+    if (g3D) {
+        if (k == '+') { g3Zm *= 1.15f; if (g3Zm > 3.0f) g3Zm = 3.0f; return; }
+        if (k == '-') { g3Zm *= 0.87f; if (g3Zm < 0.3f) g3Zm = 0.3f; return; }
     }
     if (k == 'U') { deshacer(); return; }          // deshacer: ultimo grupo
     if (k == 'C') ordP(8, 0, -gCamX, -gCamY, 0, 0, 0, 0);   // camara a origen
@@ -1665,8 +1890,8 @@ static void escModelo() {                   // escena de arranque
     ccS(gAyTxt, CI_R, QZ); ccS(gAyTxt, CI_G, 0.75f * QZ); ccS(gAyTxt, CI_B, 0.15f * QZ);
     ccS(gAyTxt, CI_A, QZ); ccS(gAyTxt, CI_FLG, 1);
     Ser* ay2 = serCr(pA, 'l', "yK",
-        "FLEC:camara  C:camara 0  U:deshacer  L:etiqueta  V:visible  "
-        "P:pin  D:borrar  F/B/Z/X:orden z");
+        "FLEC:camara  C:camara 0  U:deshacer todo  L:etiqueta  V:visible  "
+        "P:pin  D:borrar(vuelve con U)  G:3D  F/B/Z/X:orden z");
     ccS(ay2, CI_X, 6 * QZ); ccS(ay2, CI_Y, 19 * QZ);
     ccS(ay2, CI_R, 0.9f * QZ); ccS(ay2, CI_G, 0.9f * QZ); ccS(ay2, CI_B, 0.95f * QZ);
     ccS(ay2, CI_A, QZ); ccS(ay2, CI_FLG, 1);
@@ -1984,6 +2209,50 @@ static void pruebas() {
         printf("borrar limpia apuntados: %s\n",
                (gObj == 0 && gSel == 0 && gAnt == 0 && gEdito == 0) ? "PASA" : "FALLA");
     }
+    {                                      // deshacer creacion: la quita
+        long v0 = gVivos;
+        lgEmp();
+        ordCr('b', gRoot); escritor();
+        Ser* nb = 0;
+        for (long i = gRoot->nA - 1; i >= 0 && !nb; i--)
+            if (gRoot->A[i] && gRoot->A[i]->tc == 'b') nb = gRoot->A[i];
+        long vino = nb ? 1 : 0;
+        deshacer();
+        printf("deshacer creacion quita el nodo: %s\n",
+               (nb && vino && nb->tc == 0 && gVivos == v0) ? "PASA" : "FALLA");
+    }
+    {                                      // deshacer borrado: resucita
+        Ser* dz = serCr(gRoot, 'b', "dZ", "Desh");
+        long v0 = gVivos;
+        lgEmp();
+        ordP(2, dz, 0, 0, 0, 0, 0, 0); escritor();
+        long fuera = 1;
+        for (long i = 0; i < gRoot->nA; i++) if (gRoot->A[i] == dz) fuera = 0;
+        long pa = (fuera && gVivos == v0 - 1 && dz->tc != 0) ? 1 : 0;
+        deshacer();
+        long dentro = 0;
+        for (long i = 0; i < gRoot->nA; i++) if (gRoot->A[i] == dz) dentro = 1;
+        printf("deshacer borrado resucita: %s (%ld vivos)\n",
+               (pa && dentro && gVivos == v0 && dz->tc != 0) ? "PASA" : "FALLA",
+               gVivos);
+        lgEmp();                           // queda en el cementerio: sin ensuciar
+        ordP(2, dz, 0, 0, 0, 0, 0, 0); escritor();
+    }
+    {                                      // modo 3D: placas + pick orbital
+        g3D = 1; gImgGen = -1;
+        pintaTodo();
+        long nz = 0;
+        unsigned int fnd = pr(0.05f, 0.06f, 0.09f, 1.0f);
+        for (unsigned long i = 0; i < (unsigned long)gW * (unsigned long)gH; i++)
+            if (gImg[i] != fnd) nz++;
+        Ser* blanco = (g3N3 > 1) ? g3Se[1] : 0;
+        Ser* pk = blanco ? elige3D(g3Px[1], g3Py[1]) : 0;
+        printf("modo 3D pinta la escena: %s (%ld placas, %ld px)\n",
+               (g3N3 > 1 && nz > 500 && pk == blanco) ? "PASA" : "FALLA",
+               g3N3, nz);
+        g3D = 0; gImgGen = -1;
+        pintaTodo();
+    }
     Ser* uk = 0;                         // check demo: por tipo, no por puesto
     for (long i = 0; gRoot && !uk && i < gRoot->nA; i++) {
         Ser* pA0 = gRoot->A[i];
@@ -2126,6 +2395,9 @@ static void pruebas() {
         }
         fclose(o);
     }
+    gVivos += gCemN;                     // serAl vuelve a contarlos
+    for (long i = 0; i < gCemN; i++) serAl(gCem[i]);   // cementerio fuera
+    gCemN = 0;
     printf("seres: %ld vivos (%ld antes)\n", gVivos, vivos0);
     xMe((void*)gImg); gImg = 0;      // sin fuga al salir
     printf("pruebas listas: ser_check.ppm\n");
@@ -2149,6 +2421,19 @@ static LRESULT CALLBACK wnProc(HWND v, UINT m, WPARAM w, LPARAM l) {
         escritor();
         PostQuitMessage(0); return 0;
     case WM_MOUSEMOVE: {
+        if (g3D) {                       // orbita: arrastrar = girar la camara
+            static long u3x = -1, u3y = -1;
+            long mx2 = (long)(short)(l & 65535), my2 = (long)(short)((l >> 16) & 65535);
+            if (u3x >= 0) {
+                g3Az += (float)(mx2 - u3x) * 0.012f;
+                g3El += (float)(my2 - u3y) * 0.012f;
+                if (g3El < 0.05f) g3El = 0.05f;
+                if (g3El > 1.45f) g3El = 1.45f;
+                if (g3Az > 6.2832f) g3Az -= 6.2832f;
+                if (g3Az < 0.0f) g3Az += 6.2832f;
+            }
+            u3x = mx2; u3y = my2;
+            return 0; }
         if (gArra) {
             POINT p; p.x = (long)(short)(l & 65535);
             p.y = (long)(short)((l >> 16) & 65535);
@@ -2196,7 +2481,16 @@ static LRESULT CALLBACK wnProc(HWND v, UINT m, WPARAM w, LPARAM l) {
         return 0; }
     case WM_KEYDOWN:
         if (w == VK_ESCAPE) DestroyWindow(gVen);
-        if (w == VK_DELETE && gSel) { ordP(2, gSel, 0,0,0,0,0,0); escritor(); return 0; }
+        if (w == VK_DELETE && gSel) {
+            lgEmp();                     // borrar = su grupo: U lo resucita
+            ordP(2, gSel, 0,0,0,0,0,0); escritor(); return 0;
+        }
+        if (g3D) {                       // flechas: giran la camara 3D
+            if (w == VK_LEFT)  { g3Az -= 0.15f; return 0; }
+            if (w == VK_RIGHT) { g3Az += 0.15f; return 0; }
+            if (w == VK_UP)    { g3El += 0.12f; if (g3El > 1.45f) g3El = 1.45f; return 0; }
+            if (w == VK_DOWN)  { g3El -= 0.12f; if (g3El < 0.05f) g3El = 0.05f; return 0; }
+        }
         if (w == VK_UP)    { ordP(8, 0, 0, -32 * QZ, 0, 0, 0, 0); return 0; }
         if (w == VK_DOWN)  { ordP(8, 0, 0,  32 * QZ, 0, 0, 0, 0); return 0; }
         if (w == VK_LEFT)  { ordP(8, 0, -32 * QZ, 0, 0, 0, 0, 0); return 0; }

@@ -155,6 +155,36 @@ Tres bugs viejos que se tapaban mutuamente:
   insertaban como `% ' &`. Ahora los VK especiales cortan antes y solo
   pasan a la etiqueta backspace y glifos 32..126.
 
+## Deshacer real (crear y borrar incluidos)
+
+El log de deshacer creció y ahora cubre todo: `gLg[2048]` ya no se vacía
+con un arrastre largo (antes 2 entradas por píxel de `WM_MOUSEMOVE`
+comían los 128 lugares), y **crear (op 1) y borrar (op 2) son
+deshacibles**: borrar manda el nodo al **cementerio** (`gCem[8]`) en vez
+de liberarlo, `U` lo vuelve a su mismo padre (al hueco que dejó o al
+final); si el cementerio se llena, evacua al más viejo **purgando su
+rastro del log** (sus entradas quedan 0 y se saltan) para nunca resucitar
+memoria liberada. `D`/DELETE abre su propio grupo de undo. Undo de
+etiqueta (`-2`) devuelve el texto exacto previo. La barra de ayuda lo
+dice: `U:deshacer todo ... D:borrar(vuelve con U)`.
+
+## Modo 3D de la escena (G)
+
+`G` entra/sale del **modo 3D**: la escena misma vista en profundidad, no
+un motor nuevo. Cada nodo visible es una **placa** (su caja x/y/w/h, con
+tope de 1200 px) en `z = -1.1 * nivel` (padre atrás, hijos adelante),
+proyectada con la misma matemática del cubo de la cámara (rotY+rotX,
+perspectiva `1/(z+6)`, mundo = píxel/30, escala neta 1:1 en el centro) y
+rellenada con `triLleno` por el **pintor**: ordenamiento por z entre
+placas y entre las 6 caras de cada caja, con **luz** por normal rotada
+(`sh = 0.35 + 0.65*(0.4 - rz*0.7 + 0.6*ry + 0.4*rz)` tope 0.2..1).
+Interacción: FLECHAS o arrastre giran la órbita, `+`/`-` zoom (0.3..3),
+un **clic elige el tablero** (pick por centro proyectado, radio 18 px:
+queda `gSel`/`gObj` y el resto del editor opera sobre el mismo Ser).
+Las etiquetas se dibujan planas encima (siempre legibles) y ámbar para
+el nodo con foco. El bbox de la escena se computa en píxeles y se
+centra: ninguna escena se va de pantalla.
+
 ## Compilar
 
 Con GCC (MinGW64 en Windows):
@@ -167,7 +197,7 @@ En Dev-C++ (Proyecto Win32 GUI, C++11) o Makefile.win → target `Ser.o` +
 enlazado con `-luser32 -lgdi32`. Con ventana abre un editor de controles:
 botones, checks, sliders, redondeados, caches, sesiones anidadas.
 
-Sin modificar nada, `main()` corre primero la batería de pruebas (52/52 PASA,
+Sin modificar nada, `main()` corre primero la batería de pruebas (55/55 PASA,
 sin ventana) y escribe `ser_check.ppm` 800x520 como render de verificación.
 
 ## Formato
