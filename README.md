@@ -77,6 +77,22 @@ En Win son `CreateThread`/`CloseHandle`; en POSIX, `pthread_create`/`pthread_joi
 Validado por pruebas headless: "hilo par tic cronologico" e "hilo par alimenta
 la camara".
 
+## Cubo 3D y colador (el mismo Ser)
+
+La fuente del par ya no dibuja un degradado: **proyecta un cubo 3D girando**
+(perspectiva `x/(z+3.2)`, pintor por promedio de z, luz fija, relleno por
+scanlines `triLleno`). El 3D no necesita nada nuevo: es la misma fila `'x'`
+`[img,w,h,ver]` que produce pixels y viaja por el mismo embudo/seqlock.
+El **colador** es el tercer paso, un pase del impar cada 8 tics: toma el bbox
+del mundo visible, lo ajusta a una imagen de 64x48 (`gBufCol`) y pinta las
+ramas con el color de su nodo, filtradas por puntaje con **tres pesos
+volatiles** `gColAnti`/`gColImp`/`gColUrg` (frescura: cada nodo guarda el
+tic de su ultimo toque en `s->ulti`, que `ccS` actualiza en cada asignacion;
+importancia: pin 900 / abierto 500 / visible 300; urgencia: filas SM 600).
+Lo colado alimenta la camara **Colado** (bezuel fijado, `gColNodo`) por el
+mismo embudo `gColNva`. Es el esqueleto del colador a imagen del roadmap:
+la escena condensada en una imagen que ya se puede anidar, guardar y serializar.
+
 ## Camara global
 
 `gCamX`/`gCamY` volatiles: **pantalla = mundo - camara** (solo ramas sin
@@ -121,7 +137,7 @@ En Dev-C++ (Proyecto Win32 GUI, C++11) o Makefile.win → target `Ser.o` +
 enlazado con `-luser32 -lgdi32`. Con ventana abre un editor de controles:
 botones, checks, sliders, redondeados, caches, sesiones anidadas.
 
-Sin modificar nada, `main()` corre primero la batería de pruebas (45/45 PASA,
+Sin modificar nada, `main()` corre primero la batería de pruebas (47/47 PASA,
 sin ventana) y escribe `ser_check.ppm` 800x520 como render de verificación.
 
 ## Formato

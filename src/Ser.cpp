@@ -19,6 +19,12 @@
 //  ventana  : resize/maximizar ok: WM_SIZE recrea gImg y repinta todo.
 //  camara   : nodo 'm' con fila TM 'x' [img,w,h,ver]; ordFeed (k=6) la carga;
 //             sin fuente pinta CAM. Bezel Cam fijado contiene la camara.
+//  cubo 3D  : la fuente del par ya proyecta un cubo girando (perspectiva +
+//             pintor + luz): el 3D es la misma fila 'x' que produce pixels.
+//  colador  : tercer paso (pase del impar cada 8 tics): bbox del mundo fit a
+//             gBufCol 64x48; pesos volatiles gColAnti/gColImp/gColUrg (frescura
+//             via s->ulti = tic del ultimo toque en ccS); alimenta la camara
+//             Colado (gColNodo) por el mismo embudo gColNva.
 //  escritor : unico (par obrero en Win; sicrono en pruebas). La GUI encola.
 //  raster   : cache por version (solo repinta si cambia el gen), colado en
 //             orden de A[] (el mismo orden sirve para pick, multiply z).
@@ -81,6 +87,7 @@ struct Ser {
     void**  M;  long nM, cM;      // matrices dinamicas por demanda
     char**  TM;                   // 'f6' fila SM, 's' texto
     volatile long* C; long nC, cC;  // volatile C[]: todo el estado
+    volatile long ulti;             // tic del ultimo toque: frescura del colador
     volatile long vr;
 };
 
@@ -113,6 +120,7 @@ static void grC(Ser* s, long need) {      // crecimiento pedido + 2
 
 static Ser** serPool = 0; static long serPoolN = 0, serPoolU = 0;
 static volatile long gVivos = 0, gGen = 1;   // gen: version global (cache)
+static volatile long gTic = 0;               // tic cronologico del vigilante (par)
 
 static Ser* serCr(Ser* fol, char tc, const char* n2, const char* lb) {
     Ser* s;
@@ -120,6 +128,7 @@ static Ser* serCr(Ser* fol, char tc, const char* n2, const char* lb) {
     else { s = (Ser*)xM(sizeof(Ser));
            s->A = 0; s->cA = 0; s->nA = 0; s->M = 0; s->TM = 0; s->nM = 0;
            s->cM = 0; s->C = 0; s->cC = 0; s->nC = 0; s->vr = 0; }
+    s->ulti = 0;
     s->n2[0] = n2 ? n2[0] : 0;
     s->n2[1] = (n2 && n2[0]) ? n2[1] : 0;
     s->n2[2] = 0;
@@ -170,6 +179,7 @@ static long ccG(Ser* s, long i) {
 static void ccS(Ser* s, long i, long v) {
     ccG(s, i);
     s->C[i] = v;
+    s->ulti = gTic;                      // ultimo toque: frescura para el colador
     s->vr++;
     gGen++;
 }
@@ -568,7 +578,6 @@ static long long* camRow(Ser* s, long w, long h) {   // crea/ajusta fila 'x'
 }
 
 // ---- [H] hilos por pares: par = vigilante, impar = escritor (interlocked) ---
-static volatile long gTic = 0;          // tic cronologico del vigilante (par)
 static volatile long gCamNva = 0;       // embudo: hay frame nuevo para el impar
 static volatile long gParar = 0;        // apaga los hilos (fin de sesion)
 #if defined(_WIN32)
@@ -579,17 +588,146 @@ static void dormir(long ms) { Sleep(ms); }
 #include <pthread.h>
 static void dormir(long ms) { usleep((useconds_t)ms * 1000); }
 #endif
-static void camFuente() {               // el par genera el marco sintetico
-    if (!gCamNodo) return;
-    for (long j = 0; j < 24; j++)
-        for (long i = 0; i < 32; i++) {
-            long rr = (i * 8 + gCamF) & 255;
-            long gg = (j * 10 + gCamF * 2) & 255;
-            gBufCam[j * 32 + i] = pr((float)rr / 255.0f,
-                (float)gg / 255.0f, 0.6f, 1.0f);
+static void triLleno(unsigned int* im, long w, long h,
+                     float ax, float ay, float bx, float by,
+                     float cx, float cy, unsigned int col) {
+    float tx;
+    if (ay > by) { tx = ax; ax = bx; bx = tx; tx = ay; ay = by; by = tx; }
+    if (ay > cy) { tx = ax; ax = cx; cx = tx; tx = ay; ay = cy; cy = tx; }
+    if (by > cy) { tx = bx; bx = cx; cx = tx; tx = by; by = cy; cy = tx; }
+    if (cy - ay < 0.5f) return;
+    for (long y = 0; y < h; y++) {
+        float py = (float)y + 0.5f;
+        if (py < ay || py >= cy) continue;
+        float t1 = (py - ay) / (cy - ay);
+        float xl = ax + t1 * (cx - ax);
+        float xr;
+        if (py < by) {
+            float t2 = (by - ay > 0.0001f) ? (py - ay) / (by - ay) : 0.5f;
+            xr = ax + t2 * (bx - ax);
+        } else {
+            float t2 = (cy - by > 0.0001f) ? (py - by) / (cy - by) : 0.5f;
+            xr = bx + t2 * (cx - bx);
         }
+        if (xl > xr) { float sw = xl; xl = xr; xr = sw; }
+        long x0 = (long)(xl + 0.5f), x1 = (long)(xr + 0.5f);
+        if (x0 < 0) x0 = 0;
+        if (x1 > w - 1) x1 = w - 1;
+        for (long x = x0; x <= x1; x++) im[y * w + x] = col;
+    }
+}
+static void camFuente() {               // el par proyecta el cubo 3D
+    if (!gCamNodo) return;
+    static const float VX[8][3] = {
+        {-1,-1,-1},{ 1,-1,-1},{ 1, 1,-1},{-1, 1,-1},
+        {-1,-1, 1},{ 1,-1, 1},{ 1, 1, 1},{-1, 1, 1}
+    };
+    static const long FG[6][4] = {       // caras: top, bottom, left, right, frent, fond
+        {2,3,7,6},{0,1,5,4},{0,3,7,4},{1,2,6,5},{0,1,2,3},{4,5,6,7}
+    };
+    static const float CN[6][3] = {
+        {0,1,0},{0,-1,0},{-1,0,0},{1,0,0},{0,0,-1},{0,0,1}
+    };
+    static const float CB[6][3] = {
+        {0.9f,0.3f,0.2f},{0.4f,0.4f,0.5f},{0.5f,0.8f,0.3f},
+        {0.9f,0.75f,0.2f},{0.8f,0.4f,0.8f},{0.3f,0.8f,0.8f}
+    };
+    float aY = gCamF * 0.021f, aX = 0.6f + gCamF * 0.009f;
+    float cY = (float)cos((double)aY), sY = (float)sin((double)aY);
+    float cX = (float)cos((double)aX), sX = (float)sin((double)aX);
+    float px[8], py[8], pz[8], nr[6][3];
+    for (long i = 0; i < 8; i++) {
+        float x = VX[i][0], y = VX[i][1], z = VX[i][2];
+        float x2 = x * cY + z * sY;
+        float z2 = -x * sY + z * cY;
+        float y2 = y * cX - z2 * sX;
+        float z3 = y * sX + z2 * cX;
+        float inv = 1.0f / (z3 + 3.2f);       // perspectiva
+        px[i] = 16.0f + x2 * inv * 30.0f;
+        py[i] = 12.0f - y2 * inv * 24.0f;
+        pz[i] = z3;
+    }
+    float az[6];
+    for (long f = 0; f < 6; f++) {
+        az[f] = (pz[FG[f][0]] + pz[FG[f][1]] + pz[FG[f][2]] + pz[FG[f][3]]) * 0.25f;
+        float nx = CN[f][0], ny = CN[f][1], nz = CN[f][2];
+        nr[f][0] = nx * cY + nz * sY;
+        float nz2 = -nx * sY + nz * cY;
+        nr[f][1] = ny * cX - nz2 * sX;
+        nr[f][2] = ny * sX + nz2 * cX;
+    }
+    long ord[6] = { 0,1,2,3,4,5 };            // pintor: lejos primero
+    for (long a = 0; a < 5; a++)
+        for (long b3 = a + 1; b3 < 6; b3++)
+            if (az[ord[b3]] > az[ord[a]]) { long sw = ord[a]; ord[a] = ord[b3]; ord[b3] = sw; }
+    for (long oi = 0; oi < 6; oi++) {
+        long f = ord[oi];
+        float dx = 0.4f - nr[f][2] * 0.7f;    // luz fija desde arriba-frente
+        float dy = -nr[f][1] * -0.6f + nr[f][2] * 0.4f;
+        float sh = 0.35f + 0.65f * (dx + dy);
+        if (sh < 0.3f) sh = 0.3f;
+        if (sh > 1.0f) sh = 1.0f;
+        unsigned int col = pr(CB[f][0] * sh, CB[f][1] * sh, CB[f][2] * sh, 1.0f);
+        long a = FG[f][0], b3 = FG[f][1], c = FG[f][2], d = FG[f][3];
+        triLleno(gBufCam, 32, 24, px[a], py[a], px[b3], py[b3], px[c], py[c], col);
+        triLleno(gBufCam, 32, 24, px[a], py[a], px[c], py[c], px[d], py[d], col);
+    }
     gCamF += 3;
     __sync_lock_test_and_set(&gCamNva, 1);   // interlocked: hay frame nuevo
+}
+
+// ---- [C] colador: tercer proceso, escena -> imagen con pesos volatiles -------
+static volatile long gColAnti = 400, gColImp = 300, gColUrg = 300;   // pesos 0..1000
+static Ser* gColNodo = 0;               // camara 'm' que muestra lo colado
+static volatile long gColNva = 0;       // embudo: colado nuevo
+static unsigned int gBufCol[64 * 48];   // imagen colada (fit del bbox del mundo)
+static void colador() {
+    if (!gRoot) return;
+    for (long i = 0; i < 64 * 48; i++) gBufCol[i] = 0;
+    long bx0 = 1 << 30, by0 = 1 << 30, bx1 = -(1 << 30), by1 = -(1 << 30);
+    for (long i = 0; i < gRoot->nA; i++) {
+        Ser* s = gRoot->A[i];
+        if (!s || s->tc == 0) continue;
+        long fl = ccG(s, CI_FLG);
+        if (s->tc != 'r' && !(fl & 1)) continue;
+        long w = ccG(s, CI_W), h = ccG(s, CI_H);
+        if (w <= 0 || h <= 0) continue;
+        long x = ccG(s, CI_X), y = ccG(s, CI_Y);
+        if (x < bx0) bx0 = x;
+        if (y < by0) by0 = y;
+        if (x + w > bx1) bx1 = x + w;
+        if (y + h > by1) by1 = y + h;
+    }
+    if (bx1 <= bx0 || by1 <= by0) return;
+    float fs = 60.0f / (float)(bx1 - bx0);
+    float fy = 44.0f / (float)(by1 - by0);
+    if (fy < fs) fs = fy;
+    for (long i = 0; i < gRoot->nA; i++) {
+        Ser* s = gRoot->A[i];
+        if (!s || s->tc == 0) continue;
+        long fl = ccG(s, CI_FLG);
+        if (s->tc != 'r' && !(fl & 1)) continue;
+        long w = ccG(s, CI_W), h = ccG(s, CI_H);
+        if (w <= 0 || h <= 0) continue;
+        long impL = (fl & 8) ? 900 : (ccG(s, CI_ABI) ? 500 : ((fl & 1) ? 300 : 0));
+        long dc = gTic - s->ulti;
+        float fres = 1000.0f - (dc > 16000 ? 1000.0f : (float)dc / 16.0f);
+        if (fres < 0) fres = 0;
+        float urg = s->nM > 0 ? 600.0f : 100.0f;
+        float sc = ((float)gColAnti * fres + (float)gColImp * (float)impL
+                    + (float)gColUrg * urg) / 1000.0f;
+        if (sc < 1.0f) continue;         // el colador lo deja pasar de largo
+        float ax = 2.0f + ((float)ccG(s, CI_X) - (float)bx0) * fs;
+        float ay = 2.0f + ((float)ccG(s, CI_Y) - (float)by0) * fs;
+        float aw = (float)w * fs, ah = (float)h * fs;
+        if (aw < 1.0f) aw = 1.0f;
+        if (ah < 1.0f) ah = 1.0f;
+        unsigned int col = pr((float)ccG(s, CI_R) / QZ, (float)ccG(s, CI_G) / QZ,
+                              (float)ccG(s, CI_B) / QZ, (float)ccG(s, CI_A) / QZ);
+        triLleno(gBufCol, 64, 48, ax, ay, ax + aw, ay, ax, ay + ah, col);
+        triLleno(gBufCol, 64, 48, ax + aw, ay, ax, ay + ah, ax + aw, ay + ah, col);
+    }
+    __sync_lock_test_and_set(&gColNva, 1);
 }
 #if defined(_WIN32)
 static DWORD __stdcall alVigilante(void* p) {
@@ -1407,6 +1545,16 @@ static void escModelo() {                   // escena de arranque
     ccS(cmi, CI_W, 138 * QZ); ccS(cmi, CI_H, 86 * QZ);
     ccS(cmi, CI_A, QZ); ccS(cmi, CI_FLG, 1);
     gCamNodo = cmi;
+    Ser* pc2 = serCr(gRoot, 'p', "pC2", "Colado");  // tercer proceso: lo colado
+    ccS(pc2, CI_X, 640 * QZ); ccS(pc2, CI_Y, 140 * QZ);
+    ccS(pc2, CI_W, 150 * QZ); ccS(pc2, CI_H, 110 * QZ);
+    ccS(pc2, CI_R, 0.1f * QZ); ccS(pc2, CI_G, 0.12f * QZ); ccS(pc2, CI_B, 0.16f * QZ);
+    ccS(pc2, CI_A, QZ); ccS(pc2, CI_FLG, 1 | 8); ccS(pc2, CI_ABI, 1); ccS(pc2, CI_RED, 8);
+    Ser* mCol = serCr(pc2, 'm', "mC2", "Col");
+    ccS(mCol, CI_X, 6 * QZ); ccS(mCol, CI_Y, 18 * QZ);
+    ccS(mCol, CI_W, 138 * QZ); ccS(mCol, CI_H, 86 * QZ);
+    ccS(mCol, CI_A, QZ); ccS(mCol, CI_FLG, 1);
+    gColNodo = mCol;
     gInsp = serCr(gRoot, 'p', "iN", "Inspect");   // inspector fijado
     ccS(gInsp, CI_X, 16 * QZ); ccS(gInsp, CI_Y, 244 * QZ);
     ccS(gInsp, CI_W, 260 * QZ); ccS(gInsp, CI_H, 116 * QZ);
@@ -1742,6 +1890,52 @@ static void pruebas() {
            (cx && (long)cx[3] > v0x) ? "PASA" : "FALLA",
            v0x, cx ? (long)cx[3] : -1);
     parParar();                            // apaga el hilo: sesiones limpias
+    {                                      // cubo 3D: el par ya rasteriza
+        long nz1 = 0;
+        for (long i = 0; i < 768; i++) if (gBufCam[i]) nz1++;
+        for (long k = 0; k < 20; k++) camFuente();
+        long nz2 = 0;
+        for (long i = 0; i < 768; i++) if (gBufCam[i]) nz2++;
+        printf("cubo 3D girando en la camara: %s (%ld -> %ld pixeles)\n",
+               (nz1 > 10 && nz1 < 768 && nz2 > 10 && nz1 != nz2) ? "PASA" : "FALLA",
+               nz1, nz2);
+    }
+    {                                      // colador: escena -> imagen con fit
+        Ser* rv = gRoot; gRoot = 0;
+        Ser* rr = serCr(0, 'r', "cR", "ColadoTmp");
+        gRoot = rr;
+        Ser* r1 = serCr(rr, 'r', "cA", "col A");
+        ccS(r1, CI_X, 20 * QZ); ccS(r1, CI_Y, 40 * QZ);
+        ccS(r1, CI_W, 100 * QZ); ccS(r1, CI_H, 60 * QZ);
+        ccS(r1, CI_R, QZ); ccS(r1, CI_A, QZ); ccS(r1, CI_FLG, 1);
+        Ser* r2 = serCr(rr, 'r', "cB", "col B");   // encima de r1 en A[]
+        ccS(r2, CI_X, 70 * QZ); ccS(r2, CI_Y, 40 * QZ);
+        ccS(r2, CI_W, 100 * QZ); ccS(r2, CI_H, 60 * QZ);
+        ccS(r2, CI_G, QZ); ccS(r2, CI_A, QZ); ccS(r2, CI_FLG, 1);
+        Ser* m3 = serCr(rr, 'm', "m9", "colCam");   // invisible: no entra al bbox
+        ccS(m3, CI_W, 30 * QZ); ccS(m3, CI_H, 20 * QZ);
+        gColNodo = m3;
+        colador();
+        long q1 = __sync_lock_test_and_set(&gColNva, 0);
+        if (q1) ordFeed(m3, gBufCol, 64, 48);    // rol del impar (WinMain)
+        escritor();
+        long long* cf = camFil(m3);
+        float fs = 60.0f / 150.0f;               // fit: bbox 150x60 px de mundo
+        long px = (long)(2.0f + (120.0f - 20.0f) * fs);   // centro de col B
+        long py = (long)(2.0f + (70.0f - 40.0f) * fs);
+        long pz = (long)(2.0f + (30.0f - 20.0f) * fs);    // solo col A tapa ahi
+        long pz2 = (long)(2.0f + (45.0f - 40.0f) * fs);
+        printf("colador fit a imagen: %s (A=%08x B=%08x ver=%ld)\n",
+               (gBufCol[py * 64 + px] == pr(0, 1, 0, 1)
+                && gBufCol[pz2 * 64 + pz] == pr(1, 0, 0, 1)
+                && cf && (long)cf[3] == 1) ? "PASA" : "FALLA",
+               gBufCol[pz2 * 64 + pz], gBufCol[py * 64 + px],
+               cf ? (long)cf[3] : -1);
+        gColNodo = 0;
+        while (rr->nA > 0) { Ser* h2 = rr->A[rr->nA - 1]; rr->nA--; serAl(h2); }
+        serAl(rr);
+        gRoot = rv;
+    }
     Ser* uk = (gRoot->nA > 0 && gRoot->A[0] && gRoot->A[0]->nA > 1)
               ? gRoot->A[0]->A[1] : 0;                    // check Mundo
     if (uk && uk->tc == 'k') {
@@ -1786,7 +1980,7 @@ static void pruebas() {
             serAl(h);
         }
         serAl(gRoot); gRoot = 0;
-        gSes = 0; gForm = 0; gCamNodo = 0; gSel = 0; gAnt = 0; gArra = 0;
+        gSes = 0; gForm = 0; gCamNodo = 0; gColNodo = 0; gSel = 0; gAnt = 0; gArra = 0;
         gInsp = 0; gInspEd = 0; gInspVis = 0; gInspPn = 0;
         gInspR = 0; gInspG = 0; gInspB = 0; gInspRad = 0;
         gAyTxt = 0; gObj = 0;                        // sin nodos fantasma al recargar
@@ -1813,7 +2007,7 @@ static void pruebas() {
         serAl(h);
     }
     serAl(gRoot); gRoot = 0;
-    gSes = 0; gForm = 0; gCamNodo = 0; gSel = 0; gAnt = 0; gArra = 0;
+    gSes = 0; gForm = 0; gCamNodo = 0; gColNodo = 0; gSel = 0; gAnt = 0; gArra = 0;
     gInsp = 0; gInspEd = 0; gInspVis = 0; gInspPn = 0;
     gInspR = 0; gInspG = 0; gInspB = 0; gInspRad = 0;
     gAyTxt = 0; gObj = 0;
@@ -1842,7 +2036,7 @@ static void pruebas() {
             serAl(h);
         }
         serAl(gRoot); gRoot = 0;
-        gSes = 0; gForm = 0; gCamNodo = 0; gSel = 0; gAnt = 0; gArra = 0;
+        gSes = 0; gForm = 0; gCamNodo = 0; gColNodo = 0; gSel = 0; gAnt = 0; gArra = 0;
         gInsp = 0; gInspEd = 0; gInspVis = 0; gInspPn = 0;
         gInspR = 0; gInspG = 0; gInspB = 0; gInspRad = 0;
         gAyTxt = 0; gObj = 0;
@@ -1985,6 +2179,9 @@ int PASCAL WinMain(HINSTANCE i, HINSTANCE p, LPSTR c, int s) {
         }
         if (gCamNodo && __sync_lock_test_and_set(&gCamNva, 0))
             ordFeed(gCamNodo, gBufCam, 32, 24);   // embudo: el par aviso frame
+        if ((gTic & 7) == 0) colador();           // pase del impar sobre el arbol
+        if (gColNodo && __sync_lock_test_and_set(&gColNva, 0))
+            ordFeed(gColNodo, gBufCol, 64, 48);   // embudo del colado
         escritor();
         tickN9(gRoot);                       // contadores vivos por cuadro
         syncAyuda();                         // barra fija sigue al foco
