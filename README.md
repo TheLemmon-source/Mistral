@@ -125,6 +125,36 @@ contador `n9`; cualquier otra cuenta se descarta. Los valores son
 doubles (condiciones fraccionarias incluidas). Es el comienzo del
 parser general: el conteo de numeros por linea sustituye la gramatica.
 
+## Demo coherente y arcos al fol
+
+Todo control del panel `Demo` ahora hace algo visible, y las filas SM
+pueden apuntar **al padre**: en `dst` lleva un entero >= 0 (canal propio,
+como siempre) o negativo con la convencion `-1 - k` = canal `k` del
+`fol`. `f6Add(b, 0.5, 0,0,0, -1-CI_R, QZ)` pinta de rojo al panel que
+contiene al boton. Asi dependen de una sola fila: `Rojo`/`Verde`/`Azul`
+pintan el panel, `Fijar` lo clava en pantalla (xor del pin, op 2) y el
+slider `R obj` (canal `CI_EXT`) actua sobre **el nodo elegido con un
+clic**, no solo sobre el padre.
+
+## Consistencia de sesion: tipos y apuntadores
+
+Tres bugs viejos que se tapaban mutuamente:
+
+- **Al recargar, el tipo tc se perdia**: el guardado escribe `tc` como
+  letra (`%c`) pero la carga lo leia con `leeNum` (numerico), asi que
+  todo nodo recargado nacia con tipo 0 y la ventana despertaba sin
+  botones/checks/sliders funcionales tras reiniciar (parte del "parece
+  a dibujos sin funcionalidad"). La carga ahora lee el campo 3 como
+  token (`campoTxt`), para el formato viejo y el nuevo.
+- **Crash al editar etiqueta**: eliminar un nodo (k==2, DELETE/D) nunca
+  limpiaba `gObj`/`gSel`/`gAnt`/inspectores/etc: quedaban punteros
+  colgando y el proximo toque pisaba memoria liberada. Ahora
+  `borraApuntados` limpia los 16 apuntadores globales antes de liberar.
+- **Flechas que escribian basura en la etiqueta**: en `WM_KEYDOWN` los
+  codigos VK (flechas = 0x25..0x28) caian en `tecla((char)w)` y se
+  insertaban como `% ' &`. Ahora los VK especiales cortan antes y solo
+  pasan a la etiqueta backspace y glifos 32..126.
+
 ## Compilar
 
 Con GCC (MinGW64 en Windows):
@@ -137,7 +167,7 @@ En Dev-C++ (Proyecto Win32 GUI, C++11) o Makefile.win → target `Ser.o` +
 enlazado con `-luser32 -lgdi32`. Con ventana abre un editor de controles:
 botones, checks, sliders, redondeados, caches, sesiones anidadas.
 
-Sin modificar nada, `main()` corre primero la batería de pruebas (47/47 PASA,
+Sin modificar nada, `main()` corre primero la batería de pruebas (52/52 PASA,
 sin ventana) y escribe `ser_check.ppm` 800x520 como render de verificación.
 
 ## Formato

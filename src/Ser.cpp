@@ -148,6 +148,7 @@ static Ser* serCr(Ser* fol, char tc, const char* n2, const char* lb) {
     return s;
 }
 static void serAl(Ser* s) {
+    if (!s) return;                      // huecos de A[] tras borrados
     while (s->nA > 0) { Ser* h = s->A[s->nA - 1]; s->nA--; serAl(h); }
     if (s->fol)
         for (long i = 0; i < s->fol->cA; i++)
@@ -201,6 +202,7 @@ static void lgE(Ser* t, long ci, long old, char* olb) {
     gLg[gLgN].old = old; gLg[gLgN].olb = olb;
     gLgN++;
 }
+static void borraApuntados(Ser* t);      // escritor limpia colgantes al borrar
 static void deshacer() {                 // repone el ultimo grupo completo
     if (gLgN <= 0) return;
     long g = gLg[gLgN - 1].g;
@@ -284,15 +286,20 @@ static void exRows(Ser* s) {              // ejecucion de filas SM del nodo
             s->vr++; gGen++;
             continue;
         }
-        long* d = 0;
-        if (dst >= 0 && dst < s->nC) d = (long*)&s->C[dst];
+        volatile long* d = 0;
+        if (dst >= 0 && dst < s->nC) d = &s->C[dst];
+        else if (dst < 0 && s->fol) {       // arco al fol: -1-k = canal k del padre
+            long dk = -dst - 1;
+            if (dk >= 0 && dk < s->fol->nC) d = &s->fol->C[dk];
+        }
         if (!d) continue;
-        if (op == 0) *d = arg;
+        if (op == 0) *d = arg;                      // asignacion
         else if (op == 1) *d += arg;
         else if (op == 2) *d ^= arg;
         else if (op == 3) { if (*d > arg) *d = arg; if (*d < cmp) *d = cmp; }
         else if (op == 4) *d *= arg;
         s->vr++; gGen++;
+        if (dst < 0 && s->fol) s->fol->vr++;        // el fol tambien cambia
     }
 }
 static void tickN9(Ser* s) {              // contadores vivos: recorre el arbol
@@ -1065,6 +1072,7 @@ static void escritor() {
         } else if (o->k == 2) {                  // eliminar
             if (o->t && o->t->tc != 'r') {
                 Ser* f = o->t->fol;
+                borraApuntados(o->t);           // sin nodos fantasma (crash editar)
                 serAl(o->t);
                 if (f) gGen++;
             }
@@ -1151,8 +1159,20 @@ static Ser* gArra = 0;               // nodo arrastrado
 static float gDOffX, gDOffY;          // anclaje del arrastre
 static int   gSlid = 0;               // arrastrando un slider
 
-static void inspAplica(Ser* sl) {        // slider del inspector -> objetivo
-    if (!gObj || !sl || sl->fol != gInsp) return;
+static long esDe(Ser* ap, Ser* t) {      // ap vive dentro de la rama t
+    for (; ap; ap = ap->fol) if (ap == t) return 1;
+    return 0;
+}
+static void borraApuntados(Ser* t) {     // ser colgado en la rama borrada
+    Ser** ap[16] = { &gObj, &gSel, &gAnt, &gInsp, &gSes, &gForm, &gCamNodo,
+                     &gColNodo, &gInspEd, &gInspVis, &gInspPn, &gInspR,
+                     &gInspG, &gInspB, &gInspRad, &gAyTxt };
+    for (long i = 0; i < 16; i++) if (esDe(*ap[i], t)) *ap[i] = 0;
+    if (!gObj) gEdito = 0;
+}
+
+static void inspAplica(Ser* sl) {        // slider ligado -> objetivo elegido
+    if (!gObj || !sl) return;            // cualquier slider con CI_EXT actua igual
     long ch = ccG(sl, CI_EXT);
     long vr = ccG(sl, CI_VAL);
     if (ch == CI_RED) {
@@ -1367,11 +1387,13 @@ static __attribute__((unused)) long desEscena(const char* ruta) {
     long np = 0;
     while (fgets(lin, sizeof(lin), f)) {
         if (lin[0] == 'N') {
-            float fol = 0, tc = 0, x = 0, y = 0, w = 0, h = 0;
+            float fol = 0, x = 0, y = 0, w = 0, h = 0;
             float r = 0, g = 0, b = 0, a = 0, ab = 0, fl = 0, vv = 0;
-            char nomb[256];
+            char nomb[256], tct[16];
+            campoTxt(lin, 3, tct, sizeof(tct));    // tc es letra: no pasa por leeNum
+            char tcc = tct[0];
+            if (tcc < 'A' || tcc > 'z') tcc = 0;   // archivo sin tc reaparece muerto? no: neutro
             leeNum(lin, 2, &fol);
-            leeNum(lin, 3, &tc);
             long nuevo = leeNumV(lin, 4, &x);
             if (nuevo) {
                 leeNum(lin, 5, &y);
@@ -1395,11 +1417,12 @@ static __attribute__((unused)) long desEscena(const char* ruta) {
             Ser* s;
             if (fol < 0) {                       // N 0 comandos fol -1: la raiz
                 s = gRoot;                       // ya existe: no duplicar
+                s->tc = tcc ? tcc : s->tc;
                 if (s->lb) { xMe(s->lb); }
                 s->lb = xSt(nomb);
             } else {
                 Ser* folp = (fol < np) ? prev[(long)fol] : 0;
-                s = serCr(folp ? folp : gRoot, (char)(long)tc, "nd", nomb);
+                s = serCr(folp ? folp : gRoot, tcc, "nd", nomb);
             }
             ccS(s, CI_X, (long)x); ccS(s, CI_Y, (long)y);
             ccS(s, CI_W, (long)w); ccS(s, CI_H, (long)h);   // el archivo ya es punto fijo: sin *QZ
@@ -1439,27 +1462,45 @@ static void desEscenaRoot() {
 }
 static void escModelo() {                   // escena de arranque
     desEscenaRoot();
-    Ser* p = serCr(gRoot, 'p', "pA", "Dmo");
+    Ser* p = serCr(gRoot, 'p', "pA", "Demo");
     ccS(p, CI_X, 16 * QZ); ccS(p, CI_Y, 16 * QZ);
     ccS(p, CI_W, 260 * QZ); ccS(p, CI_H, 210 * QZ);
     ccS(p, CI_R, 0.14f * QZ); ccS(p, CI_G, 0.16f * QZ); ccS(p, CI_B, 0.2f * QZ);
     ccS(p, CI_A, QZ); ccS(p, CI_FLG, 1); ccS(p, CI_ABI, 1); ccS(p, CI_RED, 10);
-    Ser* b = serCr(p, 'b', "bH", "Hola");
-    ccS(b, CI_X, 10 * QZ); ccS(b, CI_Y, 22 * QZ);
-    ccS(b, CI_W, 90 * QZ); ccS(b, CI_H, 24 * QZ);
-    ccS(b, CI_R, 0.2f * QZ); ccS(b, CI_G, 0.5f * QZ); ccS(b, CI_B, 0.9f * QZ);
+    Ser* b = serCr(p, 'b', "bH", "Rojo");       // fila con arco al fol:
+    ccS(b, CI_X, 10 * QZ); ccS(b, CI_Y, 22 * QZ);   // dst -1-K = canal K del padre
+    ccS(b, CI_W, 75 * QZ); ccS(b, CI_H, 24 * QZ);
+    ccS(b, CI_R, 0.7f * QZ); ccS(b, CI_G, 0.15f * QZ); ccS(b, CI_B, 0.1f * QZ);
     ccS(b, CI_A, QZ); ccS(b, CI_FLG, 1 | 4); ccS(b, CI_RED, 6);
-    f6Add(b, 2, (double)CI_EXT, 0.0, 2.0, (double)CI_FLG, 2.0);
-    Ser* k = serCr(p, 'k', "kA", "Mundo");
+    f6Add(b, 0, 0.0, 0.0, 0.0, -1.0 - (double)CI_R, (double)QZ);
+    Ser* b2 = serCr(p, 'b', "bV", "Verde");
+    ccS(b2, CI_X, 92 * QZ); ccS(b2, CI_Y, 22 * QZ);
+    ccS(b2, CI_W, 75 * QZ); ccS(b2, CI_H, 24 * QZ);
+    ccS(b2, CI_R, 0.1f * QZ); ccS(b2, CI_G, 0.6f * QZ); ccS(b2, CI_B, 0.15f * QZ);
+    ccS(b2, CI_A, QZ); ccS(b2, CI_FLG, 1 | 4); ccS(b2, CI_RED, 6);
+    f6Add(b2, 0, 0.0, 0.0, 0.0, -1.0 - (double)CI_G, (double)QZ);
+    Ser* b3 = serCr(p, 'b', "bA", "Azul");
+    ccS(b3, CI_X, 174 * QZ); ccS(b3, CI_Y, 22 * QZ);
+    ccS(b3, CI_W, 75 * QZ); ccS(b3, CI_H, 24 * QZ);
+    ccS(b3, CI_R, 0.1f * QZ); ccS(b3, CI_G, 0.25f * QZ); ccS(b3, CI_B, 0.7f * QZ);
+    ccS(b3, CI_A, QZ); ccS(b3, CI_FLG, 1 | 4); ccS(b3, CI_RED, 6);
+    f6Add(b3, 0, 0.0, 0.0, 0.0, -1.0 - (double)CI_B, (double)QZ);
+    Ser* k = serCr(p, 'k', "kA", "Fijar");       // click: pin del panel
+    f6Add(k, 0, 0.0, 0.0, 2.0, -1.0 - (double)CI_FLG, 8.0);
     ccS(k, CI_X, 10 * QZ); ccS(k, CI_Y, 54 * QZ);
     ccS(k, CI_W, 90 * QZ); ccS(k, CI_H, 20 * QZ);
     ccS(k, CI_R, 0.2f * QZ); ccS(k, CI_G, 0.3f * QZ); ccS(k, CI_B, 0.4f * QZ);
     ccS(k, CI_A, QZ); ccS(k, CI_FLG, 1 | 2); ccS(k, CI_RED, 4);
-    Ser* s = serCr(p, 's', "sA", "Vvor");
+    Ser* s = serCr(p, 's', "sA", "R obj");      // al canal R del objeto ELEGIDO
     ccS(s, CI_X, 10 * QZ); ccS(s, CI_Y, 80 * QZ);
     ccS(s, CI_W, 200 * QZ); ccS(s, CI_H, 18 * QZ);
     ccS(s, CI_R, 0.9f * QZ); ccS(s, CI_G, 0.6f * QZ); ccS(s, CI_B, 0.1f * QZ);
     ccS(s, CI_A, QZ); ccS(s, CI_FLG, 1); ccS(s, CI_VAL, 400); ccS(s, CI_RED, 8);
+    ccS(s, CI_EXT, CI_R);
+    Ser* ay = serCr(p, 'l', "lA", "Rojo/Verde/Azul pintan panel; Fijar lo clava; R obj al nodo elegido");
+    ccS(ay, CI_X, 10 * QZ); ccS(ay, CI_Y, 104 * QZ);
+    ccS(ay, CI_R, 0.8f * QZ); ccS(ay, CI_G, 0.8f * QZ); ccS(ay, CI_B, 0.8f * QZ);
+    ccS(ay, CI_A, QZ); ccS(ay, CI_FLG, 1);
     Ser* m = serCr(gRoot, 'l', "lT", "SM Todo. es condicion y asignacion");
     ccS(m, CI_X, 300 * QZ); ccS(m, CI_Y, 20 * QZ);
     ccS(m, CI_R, QZ); ccS(m, CI_G, QZ); ccS(m, CI_B, QZ); ccS(m, CI_A, QZ);
@@ -1657,8 +1698,8 @@ static void pruebas() {
     if (b) {
         ccS(b, CI_EXT, 1);
         exRows(b);
-        printf("fila SM pulso en Hola: %s (FLG=%ld)\n",
-               (ccG(b, CI_FLG) & 2) ? "PASA" : "FALLA", ccG(b, CI_FLG));
+        printf("fila SM pinta al panel (arco al fol): %s (R=%ld)\n",
+               ccG(b->fol, CI_R) == QZ ? "PASA" : "FALLA", ccG(b->fol, CI_R));
         ccS(b, CI_EXT, 0);
     }
     ordP(4, 0, 0, 0, 0, 0, 0, 0);
@@ -1936,8 +1977,21 @@ static void pruebas() {
         serAl(rr);
         gRoot = rv;
     }
-    Ser* uk = (gRoot->nA > 0 && gRoot->A[0] && gRoot->A[0]->nA > 1)
-              ? gRoot->A[0]->A[1] : 0;                    // check Mundo
+    {                                      // borrar limpia apuntados: crash editar
+        Ser* db = serCr(gRoot, 'b', "dB", "temp");
+        gObj = db; gEdito = 1; gSel = db; gAnt = db;
+        ordP(2, db, 0, 0, 0, 0, 0, 0); escritor();
+        printf("borrar limpia apuntados: %s\n",
+               (gObj == 0 && gSel == 0 && gAnt == 0 && gEdito == 0) ? "PASA" : "FALLA");
+    }
+    Ser* uk = 0;                         // check demo: por tipo, no por puesto
+    for (long i = 0; gRoot && !uk && i < gRoot->nA; i++) {
+        Ser* pA0 = gRoot->A[i];
+        if (!pA0) continue;
+        if (pA0->tc == 'k') uk = pA0;
+        for (long j = 0; !uk && pA0->nA && j < pA0->nA; j++)
+            if (pA0->A[j] && pA0->A[j]->tc == 'k') uk = pA0->A[j];
+    }
     if (uk && uk->tc == 'k') {
         long fl0 = ccG(uk, CI_FLG);
         pisaRaton(40, 80);                       // clic real: grupo de deshacer
@@ -1967,9 +2021,15 @@ static void pruebas() {
     }
     printf("vuelta al archivo (N = vivos): %s (%ld vs %ld)\n",
            nN == gVivos ? "PASA" : "FALLA", nN, gVivos);
-    if (gRoot->nA > 0 && gRoot->A[0] && gRoot->A[0]->nA > 2
-        && gRoot->A[0]->A[2]->tc == 's') {
-        Ser* sld0 = gRoot->A[0]->A[2];
+    Ser* sld0 = 0;                       // slider demo: por tipo, no por puesto
+    for (long i = 0; gRoot && !sld0 && i < gRoot->nA; i++) {
+        Ser* pA0 = gRoot->A[i];
+        if (!pA0) continue;
+        if (pA0->tc == 's') sld0 = pA0;
+        for (long j = 0; !sld0 && pA0->nA && j < pA0->nA; j++)
+            if (pA0->A[j] && pA0->A[j]->tc == 's') sld0 = pA0->A[j];
+    }
+    if (sld0) {
         ccS(sld0, CI_VAL, 555);
         f6Add(sld0, 0.5, 0.0, 0.0, 0.0, (double)CI_VAL, 6.0);  // cond decimal
         ordP(4, 0, 0, 0, 0, 0, 0, 0); escritor();
@@ -1985,8 +2045,14 @@ static void pruebas() {
         gInspR = 0; gInspG = 0; gInspB = 0; gInspRad = 0;
         gAyTxt = 0; gObj = 0;                        // sin nodos fantasma al recargar
         long rr = desEscena(gRuta);
-        Ser* sld1 = (gRoot && gRoot->nA > 0 && gRoot->A[0]->nA > 2)
-                    ? gRoot->A[0]->A[2] : 0;
+        Ser* sld1 = 0;                       // slider al recargar: por tipo
+        for (long i = 0; gRoot && !sld1 && i < gRoot->nA; i++) {
+            Ser* q0 = gRoot->A[i];
+            if (!q0) continue;
+            if (q0->tc == 's') sld1 = q0;
+            for (long j = 0; !sld1 && q0->nA && j < q0->nA; j++)
+                if (q0->A[j] && q0->A[j]->tc == 's') sld1 = q0->A[j];
+        }
         printf("carga de escena completa: %s (%ld nodos, %ld vivos)\n",
                rr == v0 && sld1 ? "PASA" : "FALLA", rr, gVivos);
         printf("guardado conserva valor: %s (%ld)\n",
@@ -2130,11 +2196,12 @@ static LRESULT CALLBACK wnProc(HWND v, UINT m, WPARAM w, LPARAM l) {
         return 0; }
     case WM_KEYDOWN:
         if (w == VK_ESCAPE) DestroyWindow(gVen);
-        if (w == VK_DELETE && gSel) { ordP(2, gSel, 0,0,0,0,0,0); escritor(); }
-        if (w == VK_LEFT)  ordP(8, 0, -32 * QZ, 0, 0, 0, 0, 0);
-        if (w == VK_RIGHT) ordP(8, 0,  32 * QZ, 0, 0, 0, 0, 0);
-        if (w == VK_UP)    ordP(8, 0, 0, -32 * QZ, 0, 0, 0, 0);
-        if (w == VK_DOWN)  ordP(8, 0, 0,  32 * QZ, 0, 0, 0, 0);
+        if (w == VK_DELETE && gSel) { ordP(2, gSel, 0,0,0,0,0,0); escritor(); return 0; }
+        if (w == VK_UP)    { ordP(8, 0, 0, -32 * QZ, 0, 0, 0, 0); return 0; }
+        if (w == VK_DOWN)  { ordP(8, 0, 0,  32 * QZ, 0, 0, 0, 0); return 0; }
+        if (w == VK_LEFT)  { ordP(8, 0, -32 * QZ, 0, 0, 0, 0, 0); return 0; }
+        if (w == VK_RIGHT) { ordP(8, 0,  32 * QZ, 0, 0, 0, 0, 0); return 0; }
+        if (w != 8 && (w < 32 || w > 126)) return 0;   // VK codigos: no son teclas
         tecla((char)w);
         escritor();
         return 0;
