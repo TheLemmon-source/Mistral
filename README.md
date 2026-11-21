@@ -230,6 +230,24 @@ La interfaz dejo de ser dibujo sin proposito:
   una imagen que otros programas pueden abrir.
 - Ayuda del pie actualizada: `V-P-D-E en menu derecho`.
 
+## Minusculas 3x5 y arcos con profundidad (3D completo)
+
+- **Minusculas propias en la fuente 3x5**: antes el glifo de una
+  minuscula era la mayuscula (`'a'` dibujaba `A`): todo texto se veia
+  gritado. Ahora `fGly` tiene 26 glifos minusculos con x-height chico
+  (3 filas) y la misma base que las mayusculas: `Colador`, `Rojo`,
+  `efectos anti/imp/urg` se leen en case real. Labels nuevos ya se
+  escriben en case natural sin trabajo extra.
+- **Arcos al fol con profundidad en 3D**: los arcos logicos (filas SM
+  con `dst -1-k` = canal `k` del padre) ahora se ven en el modo 3D:
+  `pinta3D` dibuja un cable azul del centro proyectado del nodo al
+  centro proyectado de su padre para cada nodo que escribe al fol
+  (`arFol`). La fila fluye en la escena: el nodo que escribe y el
+  canal que recibe quedan conectados visualmente. El trayecto usa el
+  proyectado (orbita + zoom) para que gire con la camara.
+- Direcciones futuras de la fila `x` (quedan): ticks a profundidad y
+  semi-arcos texturizados.
+
 ## Compilar
 
 Con GCC (MinGW64 en Windows):
@@ -242,7 +260,7 @@ En Dev-C++ (Proyecto Win32 GUI, C++11) o Makefile.win → target `Ser.o` +
 enlazado con `-luser32 -lgdi32`. Con ventana abre un editor de controles:
 botones, checks, sliders, redondeados, caches, sesiones anidadas.
 
-Sin modificar nada, `main()` corre primero la batería de pruebas (82/82 PASA,
+Sin modificar nada, `main()` corre primero la batería de pruebas (85/85 PASA,
 sin ventana) y escribe `ser_check.ppm` 800x520 como render de verificación.
 
 ## Formato

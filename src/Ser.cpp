@@ -513,7 +513,23 @@ static bool pisaHermano(Ser* s) {
 }
 // ---- [L] tipografia 3x5 ------------------------------------------------------
 static const char* fGly(char c) {
-    switch (c >= 'a' && c <= 'z' ? (char)(c - 32) : c) {
+    switch (c) {                         // minusculas propias: x-height chico,
+    case 'a': return "00353";            // misma base que las mayusculas (fila 4)
+    case 'b': return "04656"; case 'c': return "00343";
+    case 'd': return "01353"; case 'e': return "00673";
+    case 'f': return "34744"; case 'g': return "00653";
+    case 'h': return "04655"; case 'i': return "20222";
+    case 'j': return "10116"; case 'k': return "04565";
+    case 'l': return "44444"; case 'm': return "00755";
+    case 'n': return "00655"; case 'o': return "00252";
+    case 'p': return "04654"; case 'q': return "05553";
+    case 'r': return "00644"; case 's': return "00363";
+    case 't': return "07222"; case 'u': return "05557";
+    case 'v': return "00552"; case 'w': return "00575";
+    case 'x': return "00525"; case 'y': return "00521";
+    case 'z': return "00727";
+    }
+    switch (c >= 'a' && c <= 'z' ? (char)(c - 32) : c) {   // mayusculas y resto
     case 'A': return "25755"; case 'B': return "65656"; case 'C': return "34443";
     case 'D': return "65556"; case 'E': return "74647"; case 'F': return "74644";
     case 'G': return "34553"; case 'H': return "55755"; case 'I': return "72227";
@@ -624,6 +640,19 @@ static void texto(float x, float y, const char* t, unsigned int c) {
                            (int)(y + j * sc + b + 1), c);
             }
         }
+    }
+}
+
+static void linea(long x0, long y0, long x1, long y1, unsigned int c) {
+    long dx = x1 > x0 ? x1 - x0 : x0 - x1;
+    long dy = y1 > y0 ? y1 - y0 : y0 - y1;
+    long sx = x1 > x0 ? 1 : -1, sy = y1 > y0 ? 1 : -1, er = dx - dy;
+    while (1) {
+        px((int)x0, (int)y0, c);
+        if (x0 == x1 && y0 == y1) break;
+        long e2 = er * 2;
+        if (e2 > -dy) { er -= dy; x0 += sx; }
+        if (e2 < dx) { er += dx; y0 += sy; }
     }
 }
 
@@ -1042,6 +1071,13 @@ static void reco3D(Ser* s, long nivel) {
     }
     for (long i = 0; i < s->nA; i++) reco3D(s->A[i], nivel + 1);
 }
+static long arFol(Ser* s) {              // el nodo tiene fila con arco al fol
+    if (!s) return 0;
+    for (long i = 0; i < s->nM; i++)
+        if (s->M[i] && s->TM[i] && s->TM[i][0] == 'f'
+            && (long)((double*)s->M[i])[4] < 0) return 1;
+    return 0;
+}
 static Ser* elige3D(float mx, float my) {
     Ser* r = 0;
     float bd = 18.0f;
@@ -1148,6 +1184,12 @@ static void pinta3D() {
             }
         }
     }
+    unsigned int wc = pr(0.45f, 0.7f, 1.0f, 1.0f);   // cable de arco al fol
+    for (long i = 0; i < g3N3; i++)          // nodo con arco -> cable al padre:
+        for (long j = 0; j < g3N3; j++)      // la fila se ve fluyendo en 3D
+            if (g3Se[j] && g3Se[j]->fol == g3Se[i] && arFol(g3Se[j]))
+                linea((long)g3Px[j], (long)g3Py[j],
+                      (long)g3Px[i], (long)g3Py[i], wc);
     gFS = 2;                             // etiquetas: planas, siempre legibles
     for (long i = 0; i < g3N3; i++) {
         Ser* t = g3Se[i];
@@ -2593,6 +2635,12 @@ static void pruebas() {
         printf("modo 3D pinta la escena: %s (%ld placas, %ld px)\n",
                (g3N3 > 1 && nz > 500 && pk == blanco) ? "PASA" : "FALLA",
                g3N3, nz);
+        long wr = 0;                     // cable nodo->padre de "Rojo": op 0
+        unsigned int wcol = pr(0.45f, 0.7f, 1.0f, 1.0f);
+        for (unsigned long i = 0; i < (unsigned long)gW * (unsigned long)gH; i++)
+            if (gImg[i] == wcol) wr++;
+        printf("arco al fol se ve en 3D: %s (%ld px)\n",
+               wr > 8 ? "PASA" : "FALLA", wr);
         g3D = 0; gImgGen = -1;
         pintaTodo();
     }
@@ -2917,6 +2965,33 @@ static void pruebas() {
                 gRoot->nA--; break;
             }
         gLinN = 0; listaRec(gRoot);
+    }
+    {                                    // tipografia 3x5: minusculas propias
+        int dif = strcmp(fGly('n'), fGly('N')) != 0
+               && strcmp(fGly('a'), fGly('A')) != 0
+               && strcmp(fGly('o'), fGly('O')) != 0
+               && strcmp(fGly('s'), fGly('S')) != 0;
+        printf("minusculas 3x5 distintas: %s\n", dif ? "PASA" : "FALLA");
+        long fs0 = gFS;
+        static unsigned int bk2[14 * 20];
+        for (long j = 0; j < 14; j++)
+            for (long i2 = 0; i2 < 20; i2++)
+                bk2[j * 20 + i2] = gImg[(long)(430 + j) * gW + 300 + i2];
+        gFS = 2; gTgt = gImg; gTW = gW; gTH = gH;
+        for (long j = 0; j < 14; j++)
+            for (long i2 = 0; i2 < 20; i2++)
+                gImg[(long)(430 + j) * gW + 300 + i2] = 0;
+        texto(300.0f, 430.0f, "jn", pr(1, 1, 1, 1));
+        long nb = 0;
+        for (long j = 0; j < 14; j++)
+            for (long i2 = 0; i2 < 20; i2++)
+                if (gImg[(long)(430 + j) * gW + 300 + i2]) nb++;
+        printf("minusculas se pintan: %s (%ld px)\n",
+               nb > 10 ? "PASA" : "FALLA", nb);
+        for (long j = 0; j < 14; j++)
+            for (long i2 = 0; i2 < 20; i2++)
+                gImg[(long)(430 + j) * gW + 300 + i2] = bk2[j * 20 + i2];
+        gFS = fs0;
     }
     {                                    // export: tecla E -> ser_exp.ppm
         remove("ser_exp.ppm");
