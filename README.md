@@ -450,6 +450,11 @@ filas SM es el salto:
   chips (uno por estado, el vivo en ambar) y rieles cyan con los
   saltos `op 11`. El ancho se reparte generico: cualquier cantidad de
   estados y ramificaciones, sin casos especiales.
+- El diagrama **es el editor**: clic en un chip dispara ese salto
+  (con vuelta atras: `U` lo deshace) y selecciona el estado; clic en
+  un riel selecciona su fila `op 11` directamente en el editor de
+  filas de siempre. Pintor y pickeo comparten la misma geometria
+  (`fsmBand`), asi que lo que se ve es exactamente lo que se pica.
 
 ## Contexto grafico: ppp, cm y rescalado del layout
 
@@ -483,7 +488,7 @@ En Dev-C++ (Proyecto Win32 GUI, C++11) o Makefile.win → target `Ser.o` +
 enlazado con `-luser32 -lgdi32`. Con ventana abre un editor de controles:
 botones, checks, sliders, redondeados, caches, sesiones anidadas.
 
-Sin modificar nada, `main()` corre primero la batería de pruebas (116/116 PASA,
+Sin modificar nada, `main()` corre primero la batería de pruebas (118/118 PASA,
 sin ventana) y escribe `ser_check.ppm` 800x520 como render de verificación.
 
 ## Formato

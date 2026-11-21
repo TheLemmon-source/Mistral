@@ -1507,6 +1507,14 @@ static Ser** gLin = 0;     // lista colada pintador (mismo orden sirve al pick):
 static long gLinN = 0;     // dinamica: crece al doble, nunca se recorta
 static long gLinC = 0;
 
+static void fsmBand(float w, long nA, float* cwt, float* chp,
+                    float* fyA, float* rail) {   // geometria del diagrama fsm
+    *cwt = (w - 8) / (nA > 1 ? (float)nA : 1);
+    if (*cwt < 4) *cwt = 4;
+    *chp = 3 * gFS + 4;                  // alto del chip: de la fuente
+    *fyA = 5 * gFS + 2;                  // franja del diagrama
+    *rail = *fyA + *chp + 2;             // riel de saltos
+}
 static void pintaNodo(Ser* s, float ox, float oy) {
     if (!s) return;
     long fl = ccG(s, CI_FLG);
@@ -1564,17 +1572,14 @@ static void pintaNodo(Ser* s, float ox, float oy) {
                pr(r * 1.35f, g * 1.35f, b * 1.35f, a > 0.5f ? 1 : a), red);
         texto(x + 4, y + 3, s->lb, pr(1, 1, 1, 1));
         if (s->nA > 0) {
-            float cwt = (w - 8) / (float)s->nA;      // ancho por estado: generico
-            if (cwt < 4) cwt = 4;
-            float chp = 3 * gFS + 4;                 // alto del chip: de la fuente
-            float fyA = y + 5 * gFS + 2;             // franja del diagrama
-            float rail = fyA + chp + 2;              // riel de saltos
+            float cwt = 0, chp = 0, fyA = 0, rail = 0;
+            fsmBand(w, s->nA, &cwt, &chp, &fyA, &rail);
             for (long i = 0; i < s->nA; i++) {
                 float cx = x + 4 + i * cwt;
                 unsigned int cc = (i == ccG(s, CI_EST))
                     ? pr(1, 0.75f, 0.15f, 1)         // estado vivo: ambar
                     : pr(0.25f, 0.3f, 0.4f, 1);
-                rectoQ(cx, fyA, cwt - 2 < 2 ? 2 : cwt - 2, chp, cc, 2);
+                rectoQ(cx, y + fyA, cwt - 2 < 2 ? 2 : cwt - 2, chp, cc, 2);
                 Ser* es2 = s->A[i];
                 if (!es2) continue;
                 for (long rj = 0; rj < es2->nM; rj++) {   // saltos op 11: rieles
@@ -1586,7 +1591,7 @@ static void pintaNodo(Ser* s, float ox, float oy) {
                     float x0d = cx + (cwt - 2) * 0.5f;
                     float x1d = x + 4 + nx * cwt + (cwt - 2) * 0.5f;
                     if (x1d < x0d) { float tt = x0d; x0d = x1d; x1d = tt; }
-                    rectoQ(x0d, rail, x1d - x0d, 1.5f, pr(0.5f, 0.8f, 1, 1), 0);
+                    rectoQ(x0d, y + rail, x1d - x0d, 1.5f, pr(0.5f, 0.8f, 1, 1), 0);
                 }
             }
         }
@@ -2593,6 +2598,62 @@ static void syncInsp() {                 // inspector refleja al objetivo
     }
 }
 
+static long fsmPisa(Ser* m, float mx, float my) {
+    if (!m || m->nA <= 0 || g3D) return 0;
+    long ex = 0, ey = 0; posEf(m, &ex, &ey);
+    float sx = (float)ex / QZ, sy = (float)ey / QZ;
+    for (Ser* p = m->fol; p && p != gRoot; p = p->fol) {
+        long pex = 0, pey = 0; posEf(p, &pex, &pey);
+        sx += (float)pex / QZ; sy += (float)pey / QZ;
+    }
+    Ser* r = m;                          // camara: la aplica la rama tope
+    while (r->fol && r->fol != gRoot) r = r->fol;
+    if (!(ccG(r, CI_FLG) & 8)) { sx -= (float)gCamX / QZ; sy -= (float)gCamY / QZ; }
+    float w2 = (float)ccG(m, CI_W) / QZ, h2 = (float)ccG(m, CI_H) / QZ;
+    float lx = mx - sx, ly = my - sy;
+    if (lx < 0 || ly < 0 || lx > w2 || ly > h2) return 0;
+    float cwt = 0, chp = 0, fyA = 0, rail = 0;
+    fsmBand(w2, m->nA, &cwt, &chp, &fyA, &rail);
+    if (ly >= fyA - 2 && ly <= fyA + chp + 2) {
+        long i = (long)((lx - 4) / cwt);         // un chip: saltar ahi
+        if (i < 0 || i >= m->nA || !m->A[i]) return 0;
+        lgEmp();
+        lgE(m, CI_EST, ccG(m, CI_EST), 0);       // el salto es deshacible
+        ccS(m, CI_EST, i);
+        gAnt = gSel; gSel = m->A[i];
+        if (gObj && gObj->tc != 0 && gObj != m->A[i]) ccS(gObj, CI_SEL, 0);
+        gObj = m->A[i]; gFilI = 0; gFilLast = gObj;
+        syncInsp();
+        return 1;                                // sin arrastre: el chip manda
+    }
+    if (ly >= fyA + chp && ly <= rail + 4) {
+        for (long i = 0; i < m->nA; i++) {       // un riel: su fila op 11
+            Ser* es = m->A[i];
+            if (!es) continue;
+            long k = 0;
+            for (long rj = 0; rj < es->nM; rj++) {
+                if (!es->M[rj] || !es->TM[rj] || es->TM[rj][0] != 'f') continue;
+                double* r6 = (double*)es->M[rj];
+                long filaIdx = k++;
+                if ((long)r6[3] != 11) continue;
+                long nx = (long)r6[4];
+                if (nx < 0 || nx >= m->nA || nx == i) continue;
+                float x0d = 4 + i * cwt + (cwt - 2) * 0.5f;
+                float x1d = 4 + nx * cwt + (cwt - 2) * 0.5f;
+                if (x1d < x0d) { float tt = x0d; x0d = x1d; x1d = tt; }
+                if (lx >= x0d - 2 && lx <= x1d + 2) {
+                    gAnt = gSel; gSel = es;
+                    if (gObj && gObj->tc != 0 && gObj != es) ccS(gObj, CI_SEL, 0);
+                    gObj = es; gFilI = filaIdx; gFilLast = gObj;
+                    syncInsp();
+                    return 1;                    // el editor de filas la sigue
+                }
+            }
+        }
+        return 0;
+    }
+    return 0;
+}
 static void pisaDerecho(float mx, float my) {    // boton derecho: menu
     if (g3D) return;
     if (gMenu && (ccG(gMenu, CI_FLG) & 1) &&
@@ -2648,6 +2709,7 @@ static __attribute__((unused)) void pisaRaton(float mx, float my) {
     }
     Ser* s = elige(mx, my);
     if (!s) return;
+    if (s->tc == 'f' && fsmPisa(s, mx, my)) return;   // diagrama: chips y rieles
     ratonMundo(s, mx, my, &mx, &my);         // pin: pantalla / resto: mundo
     lgEmp();                                 // un clic = un grupo de deshacer
     gAnt = gSel;
@@ -3935,6 +3997,57 @@ static void pruebas() {
         serAl(dm);
         serAl(gRoot);                            // la raiz limpia muere entera
         gRoot = rv; gImgGen = -1;
+    }
+    {   // editor de saltos: un chip dispara el salto con vuelta atras
+        Ser* rv = gRoot; gRoot = 0; desEscenaRoot();   // raiz limpia: solo la maquina
+        Ser* dm = serCr(gRoot, 'f', "ed", "Editor");
+        ccS(dm, CI_W, 180 * QZ); ccS(dm, CI_H, 40 * QZ);
+        ccS(dm, CI_X, 300 * QZ); ccS(dm, CI_Y, 200 * QZ);
+        ccS(dm, CI_FLG, 9);                      // pineada: la camara no aplica
+        for (long i = 0; i < 3; i++) serCr(dm, 'p', "ei", "st");
+        float cwt = 0, chp = 0, fyA = 0, rail = 0;
+        fsmBand(180, dm->nA, &cwt, &chp, &fyA, &rail);
+        long hit = fsmPisa(dm, 300 + 4 + cwt + cwt * 0.5f, 200 + fyA + chp * 0.5f);
+        printf("chip salta la maquina: %s (hit %ld, est %ld, filI %ld)\n",
+               hit == 1 && ccG(dm, CI_EST) == 1 && gObj == dm->A[1]
+               && gSel == dm->A[1] && gFilLast == gObj && gFilI == 0
+               ? "PASA" : "FALLA", hit, ccG(dm, CI_EST), gFilI);
+        for (long i = 0; i < gRoot->nA; i++) if (gRoot->A[i] == dm) {
+            for (long j = i; j < gRoot->nA - 1; j++) gRoot->A[j] = gRoot->A[j + 1];
+            gRoot->nA--;
+            break;
+        }
+        serAl(dm);
+        serAl(gRoot);                            // la raiz limpia muere entera
+        gRoot = rv; gImgGen = -1;
+        gObj = 0; gSel = 0; gAnt = 0; gFilI = 0; gFilLast = 0;
+    }
+    {   // editor de saltos: el riel selecciona su fila op 11
+        Ser* rv = gRoot; gRoot = 0; desEscenaRoot();   // raiz limpia: solo la maquina
+        Ser* dm = serCr(gRoot, 'f', "ed", "Editor");
+        ccS(dm, CI_W, 180 * QZ); ccS(dm, CI_H, 40 * QZ);
+        ccS(dm, CI_X, 300 * QZ); ccS(dm, CI_Y, 200 * QZ);
+        ccS(dm, CI_FLG, 9);                      // pineada: la camara no aplica
+        for (long i = 0; i < 3; i++) {
+            Ser* ei = serCr(dm, 'p', "ei", "st");
+            f6Add(ei, 0, CI_VAL, 0, 11, (double)((i + 1) % 3), 0);  // i -> i+1 mod 3
+        }
+        float cwt = 0, chp = 0, fyA = 0, rail = 0;
+        fsmBand(180, dm->nA, &cwt, &chp, &fyA, &rail);
+        long hit = fsmPisa(dm, 360, 200 + rail + 1);   // riel entre el chip 0 y el 1
+        printf("riel elige la fila: %s (hit %ld, filI %ld)\n",
+               hit == 1 && gObj == dm->A[0] && gSel == dm->A[0]
+               && gFilI == 0 && gFilLast == gObj ? "PASA" : "FALLA",
+               hit, gFilI);
+        for (long i = 0; i < gRoot->nA; i++) if (gRoot->A[i] == dm) {
+            for (long j = i; j < gRoot->nA - 1; j++) gRoot->A[j] = gRoot->A[j + 1];
+            gRoot->nA--;
+            break;
+        }
+        serAl(dm);
+        serAl(gRoot);                            // la raiz limpia muere entera
+        gRoot = rv; gImgGen = -1;
+        gObj = 0; gSel = 0; gAnt = 0; gFilI = 0; gFilLast = 0;
     }
     {   // rescalado automatico: cambio de contexto grafico, el layout sigue
         FILE* v = fopenD(gRuta, "wb");
