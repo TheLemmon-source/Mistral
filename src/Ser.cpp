@@ -55,6 +55,7 @@
 #include <math.h>
 #if defined(_WIN32)
 #include <windows.h>
+#include <mmsystem.h>
 #else
 #include <unistd.h>
 #include <sys/stat.h>
@@ -154,6 +155,7 @@ static long removeD(const char* nom) {
 #define CI_DUR 102                     // [AU] audio: duracion del buffer en ms
 #define CI_PTO 103                     // [AU] audio: aguja donde escribe la voz
 #define CI_FRE 104                     // [AU] audio: frecuencia en Hz * QZ (controlable)
+#define CI_PLA 105                     // [AU] audio: aguja de reproduccion (altavoz)
 
 // ---- [S] nucleo ser ---------------------------------------------------------
 static void* xM(unsigned long nb) {
@@ -611,8 +613,10 @@ static double* n9Add(Ser* s, double dst, double delta, double mn, double mx,
 //        dst del dueño, dur = arg ms) y WAV externo (audCarga). Salida: WAV
 //        (op 13 / audGuarda). La mezcla es aditiva: asignar CI_PTO de nuevo
 //        solapa voces. El slider de siempre controla CI_AMP/CI_PTO por filas.
+static Ser* gRoot = 0;                   // raiz viva (el bus y exRows la miran)
 static double* auFil(Ser* s);            // buffer del mezclador (lazy init)
 static long auToca(Ser* m, long hz, long ms);
+static long auSaca(Ser* m, float* d, long mx);   // [AL] altavoz: drena el mix
 
 static Ser* auDe(Ser* s) {               // el mezclador del nodo: sube por los fol
     for (Ser* p = s; p; p = p->fol)
@@ -663,6 +667,7 @@ static long auToca(Ser* m, long hz, long ms) {   // un tono con envolvente: mezc
     long n = (long)((double)sr * (double)ms / 1000.0);
     if (n > cap) n = cap;
     long pt = ccG(m, CI_PTO);
+    if (pt >= cap) pt = 0;                      // aguja llena: da la vuelta (evento eterno)
     if (pt + n > cap) n = cap - pt;             // sin pasarse del buffer
     if (n <= 0) return 0;
     float amp = (float)ccG(m, CI_AMP) / (float)QZ;
@@ -768,6 +773,185 @@ static Ser* auBusca(Ser* s) {            // el primer mezclador de la rama
     }
     return 0;
 }
+// ---- [AL] altavoz: drena los mezcladores asi como estan --------------------
+static Ser* gAlMz = 0;                   // primer mezclador visto: sr del dispositivo
+
+static long auSaca(Ser* m, float* d, long mx) {   // drena: mezcla aditiva en d y
+    if (!m || m->tc != 'a' || !d || mx < 1) return 0;   // avanza la aguja de repro
+    double* au = auFil(m);
+    if (!au || au[0] < 1) return 0;
+    long us = (long)au[0];
+    long pt = ccG(m, CI_PLA);
+    if (pt < 0 || pt >= us) { ccS(m, CI_PLA, 0); pt = 0; }   // la pieza da la vuelta
+    long n = us - pt;
+    if (n > mx) n = mx;
+    float am = (float)ccG(m, CI_AMP) / (float)QZ;
+    if (am < 0) am = 0;
+    if (am > 2) am = 2;
+    for (long i = 0; i < n; i++) d[i] += (float)au[2 + pt + i] * am;
+    long np = pt + n;
+    if (np >= us) np = 0;               // la pieza entera loopea hasta que cambie
+    ccS(m, CI_PLA, np);
+    return n;
+}
+__attribute__((unused))
+static void auDrena(Ser* s, float* fr, long* nf, long mx) {   // todos los 'a' vivos:
+    if (!s) return;                              // bus master de hecho
+    if (s->tc == 'a') {
+        long n = auSaca(s, fr, mx);
+        if (n > *nf) *nf = n;
+        if (!gAlMz) gAlMz = s;
+    }
+    for (long i = 0; i < s->nA; i++) auDrena(s->A[i], fr, nf, mx);
+}
+
+// ---- [SM] importador .sm: STATE/COND/ACT/TRUE/FALSE -> maquina 'f' ---------
+// V[k] vive en el canal 30+k de la maquina y las filas lo alcanzan con arco
+// (ci/dst/cmp/arg negativos leen o escriben el canal -1-k del fol). Agrega
+// conds de fila: 4 distinto, 5 <=, 6 >= (ademas de 0 siempre, 1 <, 2 >, 3 ==).
+// Sin undo (igual que cargar una escena). Falta: SUB con var, COND con
+// literal a, estados repetidos, mas de 256 estados.
+#define SM_V0 30                           // primera var: canal 30 de la maquina
+static long smCod(const char* w, const char* tabs[], long n) {
+    for (long i = 0; i < n; i++)
+        if (tabs[i] && strcmp(w, tabs[i]) == 0) return i;
+    return -1;
+}
+static long smArc(long k) {                // var k -> arco al canal 30+k del fol
+    return (k >= 0 && k < 66) ? -1 - (SM_V0 + k) : 0;
+}
+static Ser* smCarga(Ser* fol, const char* nom, char* err, long errCap) {
+    if (err && errCap > 0) err[0] = 0;
+    FILE* f = fopenD(nom, "rb");
+    if (!f) {
+        if (err) snprintf(err, (size_t)errCap, "no abrir %s", nom);
+        return 0;
+    }
+    Ser* m = serCr(fol, 'f', "sm", "sm");
+    long fIdx[256];
+    for (long i = 0; i < 256; i++) fIdx[i] = -1;
+    long cur = -1, cnd = 0, ci = 0, cmp = 0, cA = 0, jT = -1, jF = -1;
+    char lin[512];
+    while (fgets(lin, sizeof(lin), f)) {
+        char* h = strchr(lin, '#');        // comentarios fuera
+        if (h) *h = 0;
+        char* p = lin;
+        while (*p == ' ' || *p == '\t') p++;
+        char* eol = p + strlen(p);
+        while (eol > p && (eol[-1] == '\n' || eol[-1] == '\r'
+                           || eol[-1] == ' ' || eol[-1] == '\t')) *--eol = 0;
+        static const char* CN[7] = { 0, "LT", "GT", "EQ", "NE", "LE", "GE" };
+        static const char* VA[4] = { "SET", "ADD", "SUB", "NEG" };
+        if (m && !strncmp(p, "PROG ", 5)) {       // el nombre bautiza la maquina
+            char nomb[128] = { 0 };
+            if (sscanf(p + 5, " %127s", nomb) == 1) {
+                if (m->lb) xMe(m->lb);
+                m->lb = xSt(nomb);
+            }
+            continue;
+        }
+        if (!strncmp(p, "STATE ", 6)) {
+            long ix = atoi(p + 6);
+            if (m && cur >= 0 && jT >= 0) {          // cierra el estado anterior:
+                f6Add(m->A[fIdx[cur]], (double)cnd, (double)ci, (double)cmp,
+                      11.0, (double)(jT >= 0 ? -2 - jT : -1),
+                      (double)(jF >= 0 ? -2 - jF : -1));
+            }
+            jT = -1; jF = -1; cnd = 0; ci = 0; cmp = 0; cA = 0;
+            if (!m || ix < 0 || ix >= 256 || fIdx[ix] >= 0) continue;
+            char nq[16];
+            snprintf(nq, sizeof(nq), "s%ld", ix);
+            Ser* q = serCr(m, 'p', "st", nq);
+            if (!q) { fclose(f); return 0; }
+            fIdx[ix] = m->nA - 1;                    // hijo por orden de aparicion
+            cur = ix;
+            continue;
+        }
+        Ser* q = (m && cur >= 0 && fIdx[cur] >= 0) ? m->A[fIdx[cur]] : 0;
+        if (!q) continue;
+        if (!strncmp(p, "COND ", 5)) {     // la cond del estado: gatea y el salto
+            char w[16] = { 0 };
+            long a = 0, b2 = 0;
+            if (sscanf(p + 5, " %15s %ld %ld", w, &a, &b2) >= 1) {
+                long c2 = smCod(w, CN, 7);
+                cnd = c2 >= 0 ? c2 : 0;
+                ci = 0;
+                cmp = b2;
+                cA = (a < 0);              // COND con literal a: falta, queda siempre
+                if (a < 0) ci = smArc(-a);
+                cmp = (b2 < 0) ? smArc(-b2) : b2;   // var b: arco en cmp
+            }
+            continue;
+        }
+        if (!strncmp(p, "ACT ", 4)) {
+            char w[16] = { 0 };
+            long t = 0, v2 = 0;
+            if (sscanf(p + 4, " %15s %ld %ld", w, &t, &v2) >= 1
+                && t < 0) {
+                long ao = smCod(w, VA, 4);
+                long d2 = smArc(-t);
+                if ((ao == 0 || ao == 1)   // SET / ADD
+                    || (ao == 2 && v2 >= 0))           // SUB = ADD del inv (literal)
+                    f6Add(q, (double)(cA ? cnd : 0), (double)ci, (double)cmp,
+                          (double)(ao == 2 ? 1 : ao), (double)d2,
+                          v2 < 0 ? (double)smArc(-v2)
+                                 : (double)(ao == 2 ? -v2 : v2));
+                else if (ao == 3)          // NEG: mul por -1
+                    f6Add(q, (double)(cA ? cnd : 0), (double)ci, (double)cmp,
+                          4.0, (double)d2, -1.0);
+            }
+            continue;
+        }
+        if (!strncmp(p, "TRUE ", 5)) {
+            jT = atoi(p + 5);              // crudo hasta resolver al final
+            if (jF >= 0) {                 // FALSE ya paso: el salto sale ahora
+                f6Add(q, (double)(cA ? cnd : 0), (double)ci, (double)cmp,
+                      11.0, (double)(jT >= 0 ? -2 - jT : -1),
+                      (double)(jF >= 0 ? -2 - jF : -1));
+                jT = -1; jF = -1;
+            }
+            continue;
+        }
+        if (!strncmp(p, "FALSE ", 6)) {
+            jF = atoi(p + 6);
+            if (jT >= 0) {
+                f6Add(q, (double)(cA ? cnd : 0), (double)ci, (double)cmp,
+                      11.0, (double)(jT >= 0 ? -2 - jT : -1),
+                      (double)(jF >= 0 ? -2 - jF : -1));
+                jT = -1; jF = -1;
+            }
+            continue;
+        }
+        if (!strncmp(p, "END", 3)) break;
+    }
+    if (m && cur >= 0 && jT >= 0) {                // ultimo estado sin FALSE
+        f6Add(m->A[fIdx[cur]], (double)cnd, (double)ci, (double)cmp,
+              11.0, (double)(jT >= 0 ? -2 - jT : -1),
+              (double)(jF >= 0 ? -2 - jF : -1));
+    }
+    fclose(f);
+    if (!m || m->nA == 0) {
+        if (m) serAl(m);
+        if (err) snprintf(err, (size_t)errCap, "0 estados en %s", nom);
+        return 0;
+    }
+    for (long i = 0; i < m->nA; i++) {             // resuelve los saltos crudos
+        Ser* q = m->A[i];
+        if (!q) continue;
+        for (long j = 0; j < q->nM; j++) {
+            if (!q->M[j] || !q->TM[j] || strncmp(q->TM[j], "f6", 2)) continue;
+            double* fr2 = (double*)q->M[j];
+            if ((long)fr2[3] != 11) continue;
+            long d2 = (long)fr2[4], a2 = (long)fr2[5];
+            if (d2 <= -2) { long fi = -d2 - 2;
+                            fr2[4] = (double)(fi < 256 ? fIdx[fi] : -1); }
+            if (a2 <= -2) { long fi = -a2 - 2;
+                            fr2[5] = (double)(fi < 256 ? fIdx[fi] : -1); }
+        }
+    }
+    if (err) snprintf(err, (size_t)errCap, "%ld estados", (long)m->nA);
+    return m;
+}
 static void exN9(Ser* s) {                // contadores: delta + topes + reset
     for (long i = 0; i < s->nM; i++) {
         if (!s->M[i] || !s->TM[i]) continue;
@@ -792,23 +976,38 @@ static void exRows(Ser* s) {              // ejecucion de filas SM del nodo
         double* f = (double*)s->M[i];
         long cond = (long)f[0], ci = (long)f[1], cmp = (long)f[2];
         long op = (long)f[3], dst = (long)f[4], arg = (long)f[5];
+        long cmpR = cmp;
+        if (cmpR < 0 && s->fol) {        // arco en cmp: comparacion contra fol
+            long ak = -1 - cmpR;
+            cmpR = (ak >= 0 && ak < s->fol->nC) ? ccG(s->fol, ak) : 0;
+        }
         long v = ccG(s, ci);
+        if (ci < 0 && s->fol) {          // arco en ci: lee canal del fol
+            long ak = -1 - ci;
+            v = (ak >= 0 && ak < s->fol->nC) ? ccG(s->fol, ak) : 0;
+        }
         if (op == 11) {                  // fsm: la maquina (fol) salta a dst (verd)
                                          // o a arg (falso); -1 o igual = se queda
             Ser* m = s->fol;
             long rv = 1;
-            if (cond == 1) rv = (v < cmp);
-            else if (cond == 2) rv = (v > cmp);
-            else if (cond == 3) rv = (v == cmp);
+            if (cond == 1) rv = (v < cmpR);
+            else if (cond == 2) rv = (v > cmpR);
+            else if (cond == 3) rv = (v == cmpR);
+            else if (cond == 4) rv = (v != cmpR);   // [SM] distinto
+            else if (cond == 5) rv = (v <= cmpR);   // [SM] le
+            else if (cond == 6) rv = (v >= cmpR);   // [SM] ge
             long nx = rv ? dst : arg;
             if (m && nx >= 0 && nx != ccG(m, CI_EST)) {
                 ccS(m, CI_EST, nx); caSuma(CA_FIL); s->vr++; m->vr++; gGen++;
             }
             continue;
         }
-        if (cond == 1) { if (!(v < cmp)) continue; }
-        else if (cond == 2) { if (!(v > cmp)) continue; }
-        else if (cond == 3) { if (v != cmp) continue; }
+        if (cond == 1) { if (!(v < cmpR)) continue; }
+        else if (cond == 2) { if (!(v > cmpR)) continue; }
+        else if (cond == 3) { if (v != cmpR) continue; }
+        else if (cond == 4) { if (v == cmpR) continue; }   // [SM] distinto
+        else if (cond == 5) { if (!(v <= cmpR)) continue; }
+        else if (cond == 6) { if (!(v >= cmpR)) continue; }
         if (op == 5) {                   // meta-UI: crb crear rama hija en cascada
             char tco = (char)dst;
             long cap = arg;
@@ -863,7 +1062,8 @@ static void exRows(Ser* s) {              // ejecucion de filas SM del nodo
             if (dst >= 0) hz = ccG(s, dst);
             else if (s->fol) hz = ccG(s->fol, -dst - 1);
             Ser* mz = auDe(s);
-            if (mz && hz > 0) {
+            if (!mz) mz = auBusca(gRoot);       // bus: sin mezclador propio, el
+            if (mz && hz > 0) {                 // del arbol (Son en el demo)
                 long dms = arg;
                 if (dms <= 0) dms = ccG(mz, CI_DUR);
                 if (dms > 0) auToca(mz, hz, dms);
@@ -879,8 +1079,13 @@ static void exRows(Ser* s) {              // ejecucion de filas SM del nodo
             s->vr++; gGen++;
             continue;
         }
-        if (op == 0) *d = arg;                      // asignacion
-        else if (op == 1) *d += arg;
+        long ar = arg;
+        if ((op == 0 || op == 1) && ar < 0 && s->fol) {   // arco en arg: valor del fol
+            long ak = -1 - ar;
+            ar = (ak >= 0 && ak < s->fol->nC) ? ccG(s->fol, ak) : 0;
+        }
+        if (op == 0) *d = ar;                       // asignacion
+        else if (op == 1) *d += ar;
         else if (op == 2) *d ^= arg;
         else if (op == 3) { if (*d > arg) *d = arg; if (*d < cmp) *d = cmp; }
         else if (op == 4) *d *= arg;
@@ -978,7 +1183,6 @@ static void ordFeed(Ser* t, unsigned int* im, long w, long h) {  // [[6] camara
     oHead = hh + 1;
 }
 
-static Ser* gRoot = 0;
 static Ser* gSes  = 0;                  // contenedor de sesiones (ramas q)
 static Ser* gForm = 0;                  // nodo script meta-UI (filas op 5)
 static Ser* gCamNodo = 0;               // camara 'm' alimentada en ventana
@@ -1697,6 +1901,87 @@ static void* alVigilante(void* p) {
 }
 static void parArranca() { pthread_create(&gHiloVig, 0, alVigilante, 0); }
 static void parParar() { gParar = 1; pthread_join(gHiloVig, 0); }
+#endif
+
+// ---- [AL-32] salida a altavoz: waveOut 16 bits mono; un hilo por cuadro ----
+#if defined(_WIN32)
+static HWAVEOUT gAlDv = 0;
+static long gAlSrr = 0;
+static WAVEHDR gAlHd[4];
+static short* gAlDat[4];
+static long gAlIx = 0;
+
+static long alAbre(long sr) {              // el dispositivo a la sr del mezclador
+    if (sr < 1) sr = 22050;
+    if (gAlDv) {
+        if (gAlSrr == sr) return 1;
+        waveOutClose(gAlDv); gAlDv = 0; gAlSrr = 0;
+    }
+    if (!gAlDat[0])
+        for (long i = 0; i < 4; i++) gAlDat[i] = (short*)xM(600 * sizeof(short));
+    WAVEFORMATEX wf;
+    memset(&wf, 0, sizeof(wf));
+    wf.wFormatTag = WAVE_FORMAT_PCM;
+    wf.nChannels = 1;
+    wf.nSamplesPerSec = (DWORD)sr;
+    wf.wBitsPerSample = 16;
+    wf.nBlockAlign = 2;
+    wf.nAvgBytesPerSec = (DWORD)sr * 2;
+    if (waveOutOpen(&gAlDv, WAVE_MAPPER, &wf, 0, 0, CALLBACK_NULL)
+        != MMSYSERR_NOERROR) { gAlDv = 0; return 0; }
+    gAlSrr = sr;
+    return 1;
+}
+static long auPulsa(void) {                // un cuadro: drena los mixers -> speaker
+    if (!gRoot) return 0;
+    float fr[600];
+    for (long i = 0; i < 600; i++) fr[i] = 0;
+    long nf = 0;
+    gAlMz = 0;
+    auDrena(gRoot, fr, &nf, 600);
+    if (nf < 1) { gAlMz = 0; return 0; }
+    long sr = gAlMz ? ccG(gAlMz, CI_SR) : 22050;
+    gAlMz = 0;
+    if (!alAbre(sr)) return 0;
+    long hx = -1;
+    for (long k = 0; k < 4 && hx < 0; k++) {
+        long i = (gAlIx + k) % 4;
+        if ((gAlHd[i].dwFlags & WHDR_DONE) || !gAlHd[i].lpData) {
+            if (gAlHd[i].dwFlags & WHDR_PREPARED)
+                waveOutUnprepareHeader(gAlDv, &gAlHd[i], sizeof(WAVEHDR));
+            hx = i;
+        }
+    }
+    if (hx < 0) return 0;                  // del todo ocupado: suelta este cuadro
+    short* bl = gAlDat[hx];
+    for (long i = 0; i < nf; i++) {
+        float v2 = fr[i];
+        if (v2 > 1) v2 = 1;
+        if (v2 < -1) v2 = -1;
+        bl[i] = (short)(v2 * 32000.0f);
+    }
+    WAVEHDR* h = &gAlHd[hx];
+    memset(h, 0, sizeof(WAVEHDR));
+    h->lpData = (LPSTR)bl;
+    h->dwBufferLength = (DWORD)(nf * 2);
+    if (waveOutPrepareHeader(gAlDv, h, sizeof(WAVEHDR)) != MMSYSERR_NOERROR)
+        return 0;
+    gAlIx = (hx + 1) % 4;
+    if (waveOutWrite(gAlDv, h, sizeof(WAVEHDR)) != MMSYSERR_NOERROR) return 0;
+    return nf;
+}
+static DWORD __stdcall altavozHilo(void* p) {   // corre solo con ventana
+    (void)p;
+    while (!gParar) {
+        dormir(16);
+        auPulsa();
+    }
+    return 0;
+}
+static void altavozArranca(void) {
+    HANDLE h = CreateThread(0, 0, altavozHilo, 0, 0, 0);
+    if (h) CloseHandle(h);
+}
 #endif
 
 // ---- [P] pintado del arbol (colado por orden A[], cache por gen) ------------
@@ -3128,6 +3413,15 @@ static __attribute__((unused)) void tecla(char k) {
         if (mz) auCarga(mz, "ser_externo.wav");
         return;
     }
+    if (k == 'M') {                          // [SM] maquina de escena.sm al arbol
+        char er[128];
+        Ser* mz2 = smCarga(gRoot, "escena.sm", er, sizeof(er));
+        if (gAyTxt && gAyTxt->lb)
+            snprintf(gAyTxt->lb, 195, "%s: %s",
+                     mz2 ? "SM CARGO" : "SM FALLO", er);
+        gGen++;
+        return;
+    }
     if (k == 'U') { deshacer(); return; }          // deshacer: ultimo grupo
     if (k == 'H') { vidaDeshacer(); return; }      // H: deshacer ultima vida
     if (k == 'K') {                                // clon del objetivo
@@ -3638,10 +3932,31 @@ static void escModelo() {                   // escena de arranque
     Ser* ay2 = serCr(pA, 'l', "yK",
         "FLEC:camara  U:deshacer todo  H:deshacer vida  L:etiqueta  "
         "V-P-D-E en menu derecho  K:clonar  G:3D  DBL:fija  "
-        "F/B/Z/X:orden z  E/I:export PPM/PNG  O:doc");
+        "F/B/Z/X:orden z  E/I:export PPM/PNG  O:doc  "
+        "Y:nota W:wav J:externo M:escena.sm");
     ccS(ay2, CI_X, 6 * QZ); ccS(ay2, CI_Y, 19 * QZ);
     ccS(ay2, CI_R, 0.9f * QZ); ccS(ay2, CI_G, 0.9f * QZ); ccS(ay2, CI_B, 0.95f * QZ);
     ccS(ay2, CI_A, QZ); ccS(ay2, CI_FLG, 1);
+    Ser* mz = serCr(gRoot, 'a', "auS", "Son");   // mezclador vivo de la escena
+    ccS(mz, CI_X, 400 * QZ); ccS(mz, CI_Y, 240 * QZ);
+    ccS(mz, CI_W, 150 * QZ); ccS(mz, CI_H, 100 * QZ);
+    ccS(mz, CI_R, 0.08f * QZ); ccS(mz, CI_G, 0.2f * QZ); ccS(mz, CI_B, 0.15f * QZ);
+    ccS(mz, CI_A, QZ); ccS(mz, CI_FLG, 1); ccS(mz, CI_RED, 8);
+    Ser* fa = serCr(gRoot, 'f', "fT", "Ritmo");   // demo vivo: cuenta, salta, suena
+    ccS(fa, CI_X, 400 * QZ); ccS(fa, CI_Y, 110 * QZ);
+    ccS(fa, CI_W, 150 * QZ); ccS(fa, CI_H, 120 * QZ);
+    ccS(fa, CI_R, 0.12f * QZ); ccS(fa, CI_G, 0.14f * QZ); ccS(fa, CI_B, 0.22f * QZ);
+    ccS(fa, CI_A, QZ); ccS(fa, CI_FLG, 1); ccS(fa, CI_RED, 8);
+    ccS(fa, 31, 440 * QZ);               // V[1] = canal 31 de la maquina: la nota
+    Ser* ra0 = serCr(fa, 'p', "st", "paso");
+    f6Add(ra0, 0, 0.0, 0.0, 1.0, -1.0 - 30.0, 1.0);       // V[0] cuenta un paso
+    f6Add(ra0, 2, -1.0 - 30.0, 24.0, 11.0, 1.0, 0.0);     // > 24 -> entra la nota
+    Ser* ra1 = serCr(fa, 'p', "st", "nota");
+    f6Add(ra1, 0, 0.0, 0.0, 0.0, -1.0 - 30.0, 0.0);       // remonta el contador
+    f6Add(ra1, 0, 0.0, 0.0, 12.0, -1.0 - 31.0, 120.0);    // toca: 440 Hz, 120 ms
+    f6Add(ra1, 0, 0.0, 0.0, 11.0, 2.0, -1.0);             // siempre -> suelto
+    Ser* ra2 = serCr(fa, 'p', "st", "suelto");
+    f6Add(ra2, 0, 0.0, 0.0, 11.0, 0.0, -1.0);             // siempre -> paso
     creaMenu();
     creaFilas();
     creaColador();
@@ -4192,9 +4507,9 @@ static void pruebas() {
         gInspR = 0; gInspG = 0; gInspB = 0; gInspRad = 0;
         gAyTxt = 0; gObj = 0; gMenu = 0; gInsp2 = 0; gFilTxt = 0; gFilI = 0; gFilLast = 0;
         long rr = desEscena(gRuta);
-        Ser* mq2 = 0;
+        Ser* mq2 = 0;                        // por etiqueta: no por puesto (la escena pudo sumar maquinas)
         for (long i = 0; gRoot && !mq2 && i < gRoot->nA; i++)
-            if (gRoot->A[i]->tc == 'f') mq2 = gRoot->A[i];
+            if (gRoot->A[i]->tc == 'f' && gRoot->A[i]->lb && !strcmp(gRoot->A[i]->lb, "FSM test")) mq2 = gRoot->A[i];
         Ser* e1b = (mq2 && mq2->nA > 1) ? mq2->A[1] : 0;
         printf("polar+fsm persisten: %s (est %ld, agl %ld, rad %ld, arc %ld, filas %ld)\n",
                rr == v0 && mq2 && mq2->nA == 2 && e1b && e1b->nM == 2
@@ -4464,6 +4779,126 @@ static void pruebas() {
                "muestras %ld de %ld)\n",
                okl ? "PASA" : "FALLA", rr, mz ? ccG(mz, CI_SR) : -1,
                mz ? ccG(mz, CI_DUR) : -1, mz ? ccG(mz, CI_AMP) : -1, us, cap);
+    }
+    {   // altavoz: auSaca drena el mezclador y la pieza entera da la vuelta
+        Ser* mz = serCr(gRoot, 'a', "auS", "AlParl");
+        auToca(mz, 440, 20);                       // 20 ms = 441 muestras a 22050
+        double* au = auFil(mz);
+        long us = au ? (long)au[0] : -1;
+        float d[512];                              // cabe el dreno entero (341)
+        long n1 = auSaca(mz, d, 100);              // primeros 100
+        long p1 = ccG(mz, CI_PLA);
+        long vivos = 0;
+        for (long i = 0; i < n1; i++)
+            if (d[i] > 0.0001f || d[i] < -0.0001f) vivos++;
+        long n2 = auSaca(mz, d, 512);              // el resto entero: da la vuelta
+        long p2 = ccG(mz, CI_PLA);
+        long n3 = auSaca(mz, d, 100);              // desde 0 otra vez (loopea)
+        long p3 = ccG(mz, CI_PLA);
+        long nf = 0;
+        auDrena(gRoot, d, &nf, 200);               // bus: recorre el arbol vivo
+        printf("altavoz drena y loopea: %s (usadas %ld, dreno %ld -> %ld, "
+               "vivas %ld, resto %ld -> %ld, ciclo %ld -> %ld, bus %ld)\n",
+               n1 == 100 && p1 == 100 && vivos > 80 && n2 == 341 && p2 == 0
+               && n3 == 100 && p3 == 100 && nf == 200 ? "PASA" : "FALLA",
+               us, n1, p1, vivos, n2, p2, n3, p3, nf);
+        for (long j = 0; j < gRoot->nA; j++) if (gRoot->A[j] == mz) {
+            for (long j2 = j; j2 < gRoot->nA - 1; j2++)
+                gRoot->A[j2] = gRoot->A[j2 + 1];
+            gRoot->nA--;
+            break;
+        }
+        serAl(mz);                               // sin parlante de fondo
+    }
+    {   // importador .sm: STATE/COND/ACT/TRUE/FALSE entra como maquina 'f'
+        FILE* v = fopenD("escena.sm", "wb");
+        if (v) {
+            fprintf(v, "# demo de maquina externa\n");
+            fprintf(v, "PROG Contador\n");
+            fprintf(v, "STATE 0\n");
+            fprintf(v, "  COND GE -1 5\n");
+            fprintf(v, "  ACT SET -2 3\n");
+            fprintf(v, "  TRUE 1\n  FALSE 0\n");
+            fprintf(v, "STATE 1\n");
+            fprintf(v, "  COND GT -2 -3\n");
+            fprintf(v, "  ACT ADD -2 1\n");
+            fprintf(v, "  TRUE 0\n  FALSE -1\n");
+            fprintf(v, "END\n");
+            fclose(v);
+        }
+        char err[256];
+        Ser* m = smCarga(gRoot, "escena.sm", err, sizeof(err));
+        long ok2 = m && m->tc == 'f' && m->nA == 2
+                   && m->lb && !strcmp(m->lb, "Contador");
+        long p1s = -1, p2s = -1, p3s = -1, v32 = -1, v32b = -1;
+        long e1 = -1, e2 = -1, e3 = -1;
+        if (m) {
+            ccS(m, 31, 5);                       // V-1 = canal 31: "alcanzo 5"
+            ccS(m, 32, 0); ccS(m, 33, 10);       // V-2 y V-3
+            p1s = fsmPaso(m);
+            v32 = ccG(m, 32); e1 = ccG(m, CI_EST);
+            p2s = fsmPaso(m);
+            e2 = ccG(m, CI_EST);
+            ccS(m, 33, 2);                       // ahora V-2 > V-3
+            p3s = fsmPaso(m);
+            v32b = ccG(m, 32); e3 = ccG(m, CI_EST);
+        }
+        char err2[256];
+        Ser* bad = smCarga(gRoot, "escena_inexistente.sm", err2, sizeof(err2));
+        printf("importador .sm entra como maquina: %s (estados %ld, err '%s', "
+               "p %ld %ld %ld, v1 %ld -> %ld, est %ld %ld %ld, mal %s)\n",
+               ok2 && p1s == 1 && e1 == 1 && v32 == 3 && p2s == 1 && e2 == 1
+               && p3s == 0 && v32b == 4 && e3 == 0 && !bad ? "PASA" : "FALLA",
+               m ? (long)m->nA : -1, err, p1s, p2s, p3s,
+               v32, v32b, e1, e2, e3, bad ? "raro" : err2);
+        if (m) {
+            for (long j = 0; j < gRoot->nA; j++) if (gRoot->A[j] == m) {
+                for (long j2 = j; j2 < gRoot->nA - 1; j2++)
+                    gRoot->A[j2] = gRoot->A[j2 + 1];
+                gRoot->nA--;
+                break;
+            }
+            serAl(m);
+        }
+        removeD("escena.sm");
+    }
+    {   // ritmo: la maquina del demo vive en la escena y suena al entrar
+        while (gRoot->nA > 0) {
+            Ser* h = gRoot->A[gRoot->nA - 1];
+            gRoot->nA--;
+            serAl(h);
+        }
+        serAl(gRoot); gRoot = 0;
+        gSes = 0; gForm = 0; gCamNodo = 0; gColNodo = 0; gColPnl = 0; gSel = 0; gAnt = 0; gArra = 0;
+        gInsp = 0; gInspEd = 0; gInspVis = 0; gInspPn = 0;
+        gInspR = 0; gInspG = 0; gInspB = 0; gInspRad = 0;
+        gAyTxt = 0; gObj = 0; gMenu = 0; gInsp2 = 0; gFilTxt = 0; gFilI = 0; gFilLast = 0;
+        escModelo();
+        Ser* fa = 0; Ser* mzS = 0;
+        for (long i = 0; gRoot && i < gRoot->nA; i++) {
+            Ser* q = gRoot->A[i];
+            if (!q || !q->lb) continue;
+            if (q->tc == 'f' && !strcmp(q->lb, "Ritmo")) fa = q;
+            if (q->tc == 'a' && !strcmp(q->lb, "Son")) mzS = q;
+        }
+        long ok3 = fa && mzS && ccG(fa, 31) == 440 * QZ;
+        long enPaso = 0;
+        for (long i = 0; fa && i < 24; i++) if (fsmPaso(fa) == 0) enPaso++;
+        long p25 = fa ? fsmPaso(fa) : -1;          // entra la nota
+        long est1 = ccG(fa, CI_EST);
+        long p26 = fa ? fsmPaso(fa) : -1;          // la nota toca y va a suelto
+        long est2 = ccG(fa, CI_EST);
+        long v0r = ccG(fa, 30);
+        double* auS = mzS ? auFil(mzS) : 0;
+        long usS = auS ? (long)auS[0] : -1;
+        long p27 = fa ? fsmPaso(fa) : -1;          // suelto vuelve a paso
+        long est3 = ccG(fa, CI_EST);
+        printf("ritmo suena en la escena: %s (paso %ld/24, nota %ld est %ld, "
+               "toca %ld est %ld v0 %ld usadas %ld, suelto %ld est %ld)\n",
+               ok3 && enPaso == 24 && p25 == 1 && est1 == 1 && p26 == 2
+               && est2 == 2 && v0r == 0 && usS == 2646 && p27 == 0
+               && est3 == 0 ? "PASA" : "FALLA",
+               enPaso, p25, est1, p26, est2, v0r, usS, p27, est3);
     }
     {   // rescalado automatico: cambio de contexto grafico, el layout sigue
         FILE* v = fopenD(gRuta, "wb");
@@ -5367,6 +5802,7 @@ int PASCAL WinMain(HINSTANCE i, HINSTANCE p, LPSTR c, int s) {
     if (fuenteCarga(&gFuUI)) gGen++;     // tipografias del sistema o del layout
     if (fuenteCarga(&gFu3D)) gGen++;     // (si no hay: el nativo 5x3 de socorro)
     parArranca();                        // par vigilante: tic + fuente de camara
+    altavozArranca();                    // [AL] el altavoz drena los mezcladores
     BITMAPINFO bi;
     ZeroMemory(&bi, sizeof(bi));
     bi.bmiHeader.biSize = sizeof(bi.bmiHeader);

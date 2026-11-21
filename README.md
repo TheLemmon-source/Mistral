@@ -491,8 +491,54 @@ samples float en [-1,1]) y canales propios:
   fuera de los defaults. El buffer no persiste: lo reproducible lo
   reproducen las filas, lo externo lo re-carga `J`.
 
-Falta (proximo turno): salida a altavoz (hilo `waveOut`/WASAPI),
-grabacion de entrada, bus master de varios mezcladores.
+Falta: grabacion de entrada. Detalle del turno audio: la aguja de
+escritura (`CI_PTO`) da la vuelta al llenar el buffer (evento eterno:
+el tono nunca se corta por el final) y sin mezclador propio el
+evento cae en el bus (el primer `'a'` del arbol: el `Son` de la
+escena modelo hace de parlante para cualquier maquina).
+
+## Importador .sm: las maquinas externas entran al arbol
+
+`smCarga()` lee un archivo `.sm` de texto (formato lote 3:
+`PROG/STATE/COND/ACT/TRUE/FALSE/END`, comentarios `#`) y **arma una
+maquina `tc 'f'` real** del arbol, con estados hijos `s<i>` (etiquetas
+`s0`, `s1`,...) y filas SM de siempre. La tecla **`M`** importa
+`escena.sm` al raiz y avisa el resultado.
+
+- `COND <OP> <a> <b>` con op `LT GT EQ NE LE GE` (estas dos ultimas
+  nuevas: cond 5 `<=`, cond 6 `>=`; tambien `4` es `!=`). `a`/`b`
+  referencia variables: `-N` = variable `N`, que vive en el
+  **canal `30+N`** de la maquina (`SM_V0`); literal en `b` directo.
+  Falta: literal en `a` (queda siempre cierta) y `SUB` con variable
+  (el `SUB` con literal entra como `ADD` del invertido).
+- `ACT <OP> <tgt> <val>` con op `SET ADD SUB NEG`: filas op 0/1
+  (asignacion/suma, `val` literal o arco a variable) y op 4 (multiplo
+  por -1 para `NEG`). El gate de la asignacion es la cond del estado.
+- `TRUE n` / `FALSE n` = estados destino de la fila `op 11` de salto
+  (resolucion diferida por indice de archivo); `FALSE -1` = no salta.
+- `PROG <nombre>` bautiza la maquina. Sin undo (igual que cargar una
+  escena); sin tope practico de estados (256 slots).
+
+Al importar, todo el poder del motor esta como siempre: pisar la
+etiqueta de un estado, editar sus filas en el editor y ver la
+maquina corriendo con el diagrama de estados.
+
+## Salida a altavoz: el bus drena el arbol
+
+- `CI_PLA` (105) = **aguja de reproduccion** del mezclador (separada
+  de la aguja de escritura `CI_PTO`).
+- `auSaca(m, d, mx)` drena hasta `mx` muestras mezclando
+  aditivamente (con volumen `CI_AMP`) y **loopea la pieza entera**:
+  al llegar a las usadas vuelve a 0, asi un buffer corto suena en
+  ciclo hasta que algo lo cambie.
+- `auDrena()` recorre **todos** los `'a'` vivos del arbol (bus master
+  de hecho): cada mezclador aporta su sueno, la union es lo que
+  sale.
+- Solo en `_WIN32`: `altavozArranca()` (llamada desde `WinMain` junto
+  al par del vigilante) levanta un hilo (16 ms) que pide cuadros de
+  600 frames y los escribe con `waveOut*` (16 bits mono, RIFF ya
+  convertido, buffers redondos de 4, reabre si cambia el sample
+  rate del primer mezclador visto). Requiere enlazar `-lwinmm`.
 
 ## Contexto grafico: ppp, cm y rescalado del layout
 
@@ -519,14 +565,14 @@ Nada de tamanos fijados a mano: el arranque de la ventana mide el
 Con GCC (MinGW64 en Windows):
 
 ```
-g++ -O2 -std=c++11 src/Ser.cpp -o ser.exe -luser32 -lgdi32
+g++ -O2 -std=c++11 src/Ser.cpp -o ser.exe -luser32 -lgdi32 -lwinmm
 ```
 
 En Dev-C++ (Proyecto Win32 GUI, C++11) o Makefile.win → target `Ser.o` +
-enlazado con `-luser32 -lgdi32`. Con ventana abre un editor de controles:
+enlazado con `-luser32 -lgdi32 -lwinmm` (`winmm` = salida a altavoz). Con ventana abre un editor de controles:
 botones, checks, sliders, redondeados, caches, sesiones anidadas.
 
-Sin modificar nada, `main()` corre primero la batería de pruebas (122/122 PASA,
+Sin modificar nada, `main()` corre primero la batería de pruebas (125/125 PASA,
 sin ventana) y escribe `ser_check.ppm` 800x520 como render de verificación.
 
 ## Formato
