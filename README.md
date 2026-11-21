@@ -456,6 +456,44 @@ filas SM es el salto:
   filas de siempre. Pintor y pickeo comparten la misma geometria
   (`fsmBand`), asi que lo que se ve es exactamente lo que se pica.
 
+## Audio: mezclador, eventos y WAV
+
+El audio entra con la misma filosofia: un mezclador es un nodo
+**`tc 'a'`** con matriz **`'au'`** (`double[2+n]`: usados, capacidad,
+samples float en [-1,1]) y canales propios:
+
+- `CI_SR` (100) sample rate, `CI_DUR` (102) duracion del buffer en ms,
+  `CI_AMP` (101) volumen maestro (QZ = 1.0), `CI_PTO` (103) la aguja
+  donde escribe la proxima voz. Defaults auto-reparados: 22050 Hz,
+  1000 ms, volumen completo; capacidad = `sr*dur/1000+4` con topes
+  sanitarios (96000 Hz, 60000 ms).
+- **op 12 = tocar por evento**: la frecuencia sale del canal `dst` del
+  nodo dueno de la fila (`dst < 0` = lectura al fol via arco, como
+  siempre), `arg` = duracion en ms (si `<= 0` usa `CI_DUR` del
+  mezclador) y el volumen es `CI_AMP`. Renderiza un seno con
+  envolvente fade in/out (n/10), clip [-1,1], sobre la aguja y la
+  avanza. Junto con fsm: un estado con fila op 12 **suena al entrar**.
+- **Mezcla aditiva**: asignar `CI_PTO` a 0 entre tonos (fila op 0
+  `CI_PTO=0`) hace que las voces solapen en el mismo tramo y se sumen;
+  dejarla correr las pone en secuencia.
+- **op 13 = exportar**: escribe `ser_son.wav` (RIFF/PCM 16 bits mono)
+  con lo mezclado hasta ahora.
+- **Audio externo**: tecla `J` carga `ser_externo.wav` al mezclador
+  vivo (parser RIFF propio, chunks fmt/data, PCM 16 mono); ajusta
+  `CI_SR` y capacidad, la aguja sigue al final.
+- Teclas: **Y** toca el demo (440 Hz, 300 ms) en el mezclador vivo,
+  **W** exporta su WAV. `auVivo()` = el objeto picado si es `tc 'a'`,
+  si no el primer mezclador del arbol.
+- El pintor dibuja el panel con la **onda** (pico por columna) y la
+  aguja cyan; el doc de escena lista
+  `audio: N Hz, M muestras de CAP, aguja P`.
+- Persistencia: linea `A <idx> <sr> <dur> <amp>` solo si hay algo
+  fuera de los defaults. El buffer no persiste: lo reproducible lo
+  reproducen las filas, lo externo lo re-carga `J`.
+
+Falta (proximo turno): salida a altavoz (hilo `waveOut`/WASAPI),
+grabacion de entrada, bus master de varios mezcladores.
+
 ## Contexto grafico: ppp, cm y rescalado del layout
 
 Nada de tamanos fijados a mano: el arranque de la ventana mide el
@@ -488,7 +526,7 @@ En Dev-C++ (Proyecto Win32 GUI, C++11) o Makefile.win → target `Ser.o` +
 enlazado con `-luser32 -lgdi32`. Con ventana abre un editor de controles:
 botones, checks, sliders, redondeados, caches, sesiones anidadas.
 
-Sin modificar nada, `main()` corre primero la batería de pruebas (118/118 PASA,
+Sin modificar nada, `main()` corre primero la batería de pruebas (122/122 PASA,
 sin ventana) y escribe `ser_check.ppm` 800x520 como render de verificación.
 
 ## Formato
@@ -496,7 +534,8 @@ sin ventana) y escribe `ser_check.ppm` 800x520 como render de verificación.
 - Nodo: `struct Ser` con `fol` (padre), `A[]` (hijos, orden = z-order),
   etiqueta `n2[2]` y tipo `tc` char (`r` rect, `p` panel, `b` boton,
   `k` check, `s` slider, `l` texto, `e` editor, `c` contenedor,
-  `o` cubo/textura, `q` sesion, `m` camara).
+  `o` cubo/textura, `q` sesion, `m` camara, `f` maquina,
+  `a` mezclador).
 - Banderas `CI_FLG`: bit 1 visible, bit 2 marcado, bit 4 de editor,
   **bit 8 = pin**: primer plano (se colan al final del z-order, pick
   los gana) e inamovible (sin `mandaAlFrente`, sin arrastre).
@@ -506,7 +545,8 @@ sin ventana) y escribe `ser_check.ppm` 800x520 como render de verificación.
   al control de camara; con ventana corre una fuente sintetica animada.
 - Matrices `M[i]` con identificador `TM[i]` char*: `'f6'` = fila SM
   `[cond,ci,cmp,op,dst,arg]`, `'g'` = cache de campocromatico
-  (`long long[4]`: img, w, h, version), `'s'` = texto.
+  (`long long[4]`: img, w, h, version), `'s'` = texto,
+  `'au'` = buffer de audio (`double[2+n]`: usados, capacidad, samples).
 - Filas SM: op `0=set 1=add 2=toggle 3=clip 4=mul` y op `5=crb`:
   crea rama hija de tipo `(char)dst` bajo el nodo script, con tope
   `arg` (`nA < arg`) => despliegue en cascada sin duplicados. Es el
