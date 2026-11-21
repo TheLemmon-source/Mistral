@@ -136,7 +136,9 @@ static long removeD(const char* nom) {
 #define CI_SEL 13
 #define CI_MAX 14
 #define CI_PON 14                      // [R] pool de reservas: cantidad de slots
-#define CI_TOP 15                      // [R] pool: C[CI_TOP+i] es el slot i
+#define CI_POE 15                      // [R] pool: epoch = liberaciones de slots confirmados
+#define CI_POS 16                      // [R] pool: proximo slot a escanear (rotacion)
+#define CI_TOP 17                      // [R] pool: C[CI_TOP+i] es el slot i
 
 // ---- [S] nucleo ser ---------------------------------------------------------
 static void* xM(unsigned long nb) {
@@ -275,25 +277,44 @@ static void ccS(Ser* s, long i, long v) {
 }
 
 // ---- [R] pool de reservas CAS: slots en C[CI_TOP..CI_TOP+CI_PON) -------------
-//        slot en 0 (libre) o 1 (tomado); toma y suelta son atomicas.
+//        slot en 0 (libre), 1 (reservado) o 2 (confirmado/en uso);
+//        toma, confirma y suelta son atomicas. 2 fases: quien reservo confirma
+//        antes de usar; el epoch cuenta liberaciones de slots confirmados.
 static void resFija(Ser* s, long n) {    // arma o redimensiona el pool
     if (n < 0) n = 0;
     if (n > 64) n = 64;                  // tope sanitario
     ccS(s, CI_PON, n);
+    ccS(s, CI_POE, 0);
+    ccS(s, CI_POS, 0);
     for (long i = 0; i < n; i++) ccS(s, CI_TOP + i, 0);
 }
-static long resToma(Ser* s) {            // 1er slot libre via CAS; -1 si lleno
+static long resToma(Ser* s) {            // 1er slot libre via CAS, escaneo rotativo
     long n = ccG(s, CI_PON);
-    for (long i = 0; i < n; i++)
+    if (n < 1) return -1;
+    long st = ccG(s, CI_POS) % n;        // arranca donde quedo la ultima toma
+    for (long k = 0; k < n; k++) {
+        long i = st + k; if (i >= n) i -= n;
         if (__sync_bool_compare_and_swap(&s->C[CI_TOP + i], 0, 1)) {
+            ccS(s, CI_POS, (i + 1) % n); // la proxima toma escanea desde i+1
             caSuma(CA_RES);
             return i;
         }
+    }
     return -1;
 }
-static void resSuelta(Ser* s, long i) {  // libera el slot i via CAS
+static long resConfirma(Ser* s, long i) { // reserva -> en uso via CAS (1 -> 2)
+    if (i < 0 || i >= ccG(s, CI_PON)) return 0;
+    return __sync_bool_compare_and_swap(&s->C[CI_TOP + i], 1, 2);
+}
+static long resEpoch(Ser* s) {           // liberaciones de slots confirmados
+    return ccG(s, CI_POE);
+}
+static void resSuelta(Ser* s, long i) {  // libera slot reservado o confirmado
     if (i < 0 || i >= ccG(s, CI_PON)) return;
-    __sync_bool_compare_and_swap(&s->C[CI_TOP + i], 1, 0);
+    if (__sync_bool_compare_and_swap(&s->C[CI_TOP + i], 2, 0))
+        __sync_fetch_and_add(&s->C[CI_POE], 1);      // epoch avanza en cada liberacion
+    else
+        __sync_bool_compare_and_swap(&s->C[CI_TOP + i], 1, 0);
 }
 static long resVivos(Ser* s) {           // slots tomados ahora
     long n = ccG(s, CI_PON), v = 0;
@@ -491,6 +512,12 @@ static void exRows(Ser* s) {              // ejecucion de filas SM del nodo
         if (op == 7) {                   // soltar el slot arg; dst queda en 0
             resSuelta(s, arg);
             *d = 0;
+            caSuma(CA_FIL);
+            s->vr++; gGen++;
+            continue;
+        }
+        if (op == 8) {                   // confirmar el slot arg (reserva -> en uso)
+            *d = resConfirma(s, arg);
             caSuma(CA_FIL);
             s->vr++; gGen++;
             continue;
@@ -1912,8 +1939,8 @@ static void docRec(FILE* f, Ser* t, long prof) {     // el arbol como documento
     }
     if (ccG(t, CI_PON) > 0) {                        // pool de reservas activo
         for (long i = 0; i <= prof; i++) fprintf(f, "  ");
-        fprintf(f, "pool: %ld de %ld slots ocupados\n",
-                resVivos(t), ccG(t, CI_PON));
+        fprintf(f, "pool: %ld de %ld slots ocupados (epoch %ld)\n",
+                resVivos(t), ccG(t, CI_PON), resEpoch(t));
     }
     for (long i = 0; i < t->nA; i++) docRec(f, t->A[i], prof + 1);
 }
@@ -3888,6 +3915,74 @@ static void pruebas() {
         int okA = (dS == 1 && dF >= 1 && dO >= 1 && v7 == 7 && hadC >= 2);
         printf("contadores Ca (ser/filas/ordenes/doc): %s\n",
                okA ? "PASA" : "FALLA");
+        serAl(p);
+        gRoot = rv;
+    }
+    {   // reserva 2 fases: reserva -> confirma -> suelta; epoch por liberacion
+        Ser* rv = gRoot; gRoot = 0;
+        Ser* p = serCr(0, 'p', "pf", "Fase2");
+        resFija(p, 2);
+        long a1 = resToma(p);
+        int okR = (a1 == 0 && ccG(p, CI_TOP) == 1 && resVivos(p) == 1);
+        okR = okR && resConfirma(p, a1) && ccG(p, CI_TOP) == 2
+              && resVivos(p) == 1;
+        long e0 = resEpoch(p);
+        resSuelta(p, a1);
+        okR = okR && ccG(p, CI_TOP) == 0 && resEpoch(p) == e0 + 1;
+        printf("reserva 2 fases (reserva/confirma/suelta/epoch): %s\n",
+               okR ? "PASA" : "FALLA");
+        serAl(p);
+        gRoot = rv;
+    }
+    {   // soltar reserva sin confirmar: limpia y no cuenta en el epoch
+        Ser* rv = gRoot; gRoot = 0;
+        Ser* p = serCr(0, 'p', "pf", "Fase1");
+        resFija(p, 1);
+        long e0 = resEpoch(p);
+        long a1 = resToma(p);
+        resSuelta(p, a1);                // directo desde reservado (1 -> 0)
+        int okN = (a1 == 0 && ccG(p, CI_TOP) == 0 && resEpoch(p) == e0
+                   && resVivos(p) == 0);
+        long b1 = resToma(p);
+        okN = okN && b1 == 0 && resConfirma(p, b1)
+              && ccG(p, CI_TOP) == 2 && resVivos(p) == 1;
+        resSuelta(p, b1);                // desde confirmado (2 -> 0): epoch + 1
+        okN = okN && ccG(p, CI_TOP) == 0 && resEpoch(p) == e0 + 1;
+        printf("reserva sin confirmar se suelta limpia (epoch 1): %s\n",
+               okN ? "PASA" : "FALLA");
+        serAl(p);
+        gRoot = rv;
+    }
+    {   // filas SM de reserva 2 fases: op 6 reserva, op 8 confirma, op 7 suelta
+        Ser* rv = gRoot; gRoot = 0;
+        Ser* p = serCr(0, 'p', "pf", "FilaF2");
+        resFija(p, 1);
+        f6Add(p, 0, 0, 0, 6, CI_EXT, 0);          // reserva -> EXT = slot + 1
+        f6Add(p, 0, 0, 0, 8, CI_VAL, 0);          // confirma slot 0 -> en uso
+        exRows(p);
+        int okH = (ccG(p, CI_EXT) == 1 && ccG(p, CI_VAL) == 1
+                   && ccG(p, CI_TOP) == 2);
+        f6Add(p, 0, 0, 0, 7, CI_EXT, 0);          // suelta el confirmado
+        exRows(p);
+        okH = okH && ccG(p, CI_EXT) == 0 && ccG(p, CI_TOP) == 0
+              && resEpoch(p) == 1;
+        printf("filas SM de reserva 2 fases (op 6/8/7): %s\n",
+               okH ? "PASA" : "FALLA");
+        serAl(p);
+        gRoot = rv;
+    }
+    {   // escaneo rotativo: toma/suelta secuencial reparte los slots
+        Ser* rv = gRoot; gRoot = 0;
+        Ser* p = serCr(0, 'p', "pf", "Rota");
+        resFija(p, 2);
+        long x1 = resToma(p);
+        resSuelta(p, x1);
+        long y1 = resToma(p);
+        resSuelta(p, y1);
+        long z1 = resToma(p);
+        int okT = (x1 == 0 && y1 == 1 && z1 == 0 && ccG(p, CI_POS) == 1);
+        printf("scan rotativo del pool (alterna slots): %s\n",
+               okT ? "PASA" : "FALLA");
         serAl(p);
         gRoot = rv;
     }

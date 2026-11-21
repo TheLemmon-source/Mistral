@@ -327,20 +327,29 @@ y caian fuera de la proyeccion.
 ## Pool de reservas CAS y contadores por sistema
 
 Cada nodo puede declarar un **pool de reservas**: `CI_PON` slots que viven
-en su propio `C[CI_TOP..CI_TOP+CI_PON)` (0 = libre, 1 = tomado). Tomar y
-soltar son **CAS atomicas** (`__sync_bool_compare_and_swap`), asi que
-sirven para repartir recursos entre hilos sin mutex:
+en su propio `C[CI_TOP..CI_TOP+CI_PON)` (0 = libre, 1 = reservado,
+2 = confirmado/en uso). Tomar, confirmar y soltar son **CAS atomicas**
+(`__sync_bool_compare_and_swap`), asi que sirven para repartir recursos
+entre hilos sin mutex:
 
 - `resFija(s, n)` arma o redimensiona el pool (tope 64, slots limpios).
-- `resToma(s)` devuelve el indice del primer slot libre o -1 si esta
-  lleno; `resSuelta(s, i)` lo libera; `resVivos(s)` cuenta ocupados.
+- `resToma(s)` reserva el primer slot libre o -1 si esta lleno, con
+  **escaneo rotativo**: arranca donde quedo la ultima toma (`CI_POS`),
+  asi toma/suelta secuencial reparte los slots en vez de atorarse en el
+  mismo. `resConfirma(s, i)` pasa el slot a en uso (CAS 1 -> 2);
+  `resSuelta(s, i)` libera desde reservado o confirmado, y si estaba
+  confirmado suma **epoch** (`CI_POE`): un contador de generaciones del
+  pool que avanza con cada liberacion confirmada. `resVivos(s)` cuenta
+  ocupados. Tomar sin confirmar sigue siendo util: la suelta limpia no
+  cuenta epoch, marca de que el recurso nunca se uso.
 - Como **filas SM**: op `6` reserva y escribe en `dst` el slot + 1 (0 si
-  agotado), op `7` suelta el slot `arg`. El condicional de la fila sigue
-  funcionando: "si hay hueco, reservo; si no, valgo 0" es una fila.
+  agotado), op `8` confirma el slot `arg`, op `7` suelta el slot `arg`.
+  El condicional de la fila sigue funcionando: "si hay hueco, reservo;
+  si no, valgo 0" es una fila, y confirmar sobre un slot ajeno da 0.
 - El documento de escena (`O`) lista por nodo `pool: N de M slots
-  ocupados`, y al pie dos lineas **contadores ca** con telemetria de
-  sistema: seres, muertes, matrices, filas ejecutadas, ordenes drenadas
-  por el escritor, reservas tomadas y exportes.
+  ocupados (epoch E)`, y al pie dos lineas **contadores ca** con
+  telemetria de sistema: seres, muertes, matrices, filas ejecutadas,
+  ordenes drenadas por el escritor, reservas tomadas y exportes.
 
 ## Compilar
 
@@ -354,7 +363,7 @@ En Dev-C++ (Proyecto Win32 GUI, C++11) o Makefile.win → target `Ser.o` +
 enlazado con `-luser32 -lgdi32`. Con ventana abre un editor de controles:
 botones, checks, sliders, redondeados, caches, sesiones anidadas.
 
-Sin modificar nada, `main()` corre primero la batería de pruebas (99/99 PASA,
+Sin modificar nada, `main()` corre primero la batería de pruebas (103/103 PASA,
 sin ventana) y escribe `ser_check.ppm` 800x520 como render de verificación.
 
 ## Formato
