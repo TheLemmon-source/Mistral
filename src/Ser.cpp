@@ -186,16 +186,21 @@ static void ccS(Ser* s, long i, long v) {
 }
 
 // ---- [U] deshacer: log de asignaciones por grupos ----------------------------
-struct Lg { Ser* t; long g; long ci; long old; char* olb; };
+struct Lg { Ser* t; long g; long ci; long old; char* olb; double row[6]; };
 static struct Lg gLg[2048];               // un arrastre gasta 2 por pixel
 static long gLgN = 0;                    // entradas usadas
 static long gLgG = 0;                    // grupo de acciones actual
 
 static void lgEmp() { gLgG++; }          // accion nueva del usuario: grupo nuevo
+static void lgSuelta(long i) {           // libera olb solo si es texto propio
+    struct Lg* e = &gLg[i];
+    if (e->ci == -2) { xMe(e->olb); }
+    e->olb = 0;
+}
 static void lgE(Ser* t, long ci, long old, char* olb) {
-    if (!t || t->tc == 0) { xMe(olb); return; }      // muerto: no se loguea
-    if (gLgN >= 128) {                   // sin lugar: se pierde el fondo
-        for (long i = 0; i < gLgN; i++) xMe(gLg[i].olb);
+    if (!t || t->tc == 0) { if (ci == -2) xMe(olb); return; }  // muerto: nada
+    if (gLgN >= 2048) {                  // sin lugar: se pierde el fondo
+        for (long i = 0; i < gLgN; i++) lgSuelta(i);
         gLgN = 0;
     }
     gLg[gLgN].t = t; gLg[gLgN].g = gLgG; gLg[gLgN].ci = ci;
@@ -204,6 +209,9 @@ static void lgE(Ser* t, long ci, long old, char* olb) {
 }
 static void borraApuntados(Ser* t);      // escritor limpia colgantes al borrar
 static void serAl(Ser* s);               // Cementerio libera deshaciendo evict
+static void syncInsp();                  // escritor op 9 marca el clon
+static Ser* elige(float mx, float my);   // menu contextual: elige debajo
+static Ser* clonaSer(Ser* t, Ser* fol);  // op 9: copia profunda con filas
 
 // Cementerio: borrados con vuelta atras. El nodo se deshoja (queda fuera del
 // arbol, no pinta, no pick, no archivo) pero sobrevive hasta 8 borrados.
@@ -247,15 +255,28 @@ static void deshacer() {                 // repone el ultimo grupo completo
     for (long j = gLgN - 1; j >= i; j--) {           // en reversa
         Ser* t = gLg[j].t;
         long ci = gLg[j].ci;
-        if (!t) { xMe(gLg[j].olb); continue; }
+        if (!t) { lgSuelta(j); continue; }
         if (ci == -3) {                              // nodo creado: se quita
             if (t->tc != 0) {
                 borraApuntados(t); t->vr++; gGen++; serAl(t);
             }
         } else if (ci == -4) {                       // borrado: se resucita
             if (t->tc != 0) resucita(t);
+        } else if (ci == -5) {                       // fila SM: se repone entera
+            if (t->tc == 0) { lgSuelta(j); continue; }
+            double* f = (double*)gLg[j].olb;         // puntero a la fila (64)
+            if (f) {
+                long viva = 0;
+                for (long m = 0; m < t->nM; m++)
+                    if ((double*)t->M[m] == f) { viva = 1; break; }
+                if (viva) {
+                    for (long w2 = 0; w2 < 6; w2++) f[w2] = gLg[j].row[w2];
+                    t->vr++; gGen++;
+                }
+                gLg[j].olb = 0;
+            }
         } else {
-            if (t->tc == 0) { xMe(gLg[j].olb); continue; }
+            if (t->tc == 0) { lgSuelta(j); continue; }
             if (ci == -2) {                          // etiqueta: se repone
                 if (gLg[j].olb) { xMe(t->lb); t->lb = gLg[j].olb; gLg[j].olb = 0; }
             } else ccS(t, ci, gLg[j].old);
@@ -437,6 +458,11 @@ static Ser* gInspPn = 0;                // check pin
 static Ser* gInspR = 0; static Ser* gInspG = 0;
 static Ser* gInspB = 0; static Ser* gInspRad = 0;
 static Ser* gAyTxt = 0;                 // estado vivo: foco + teclado
+static Ser* gMenu = 0;                  // menu contextual (clic derecho)
+static Ser* gInsp2 = 0;                 // panel filas SM (fijado)
+static Ser* gFilTxt = 0;                // texto vivo de la fila elegida
+static long gFilI = 0;                  // fila SM elegida del objetivo
+static Ser* gFilLast = 0;               // objetivo anterior: resetea gFilI
 static long gEdito = 0;                 // escribiendo etiqueta del objetivo
 static volatile long gCamX = 0, gCamY = 0;  // camara global: pantalla = mundo - cam
 static volatile long gCamVer = 0;       // version de camara: invalida el volcado
@@ -1226,6 +1252,11 @@ static void mandaAlFrente(Ser* s) {
     }
 }
 
+static Ser* gSel = 0; static Ser* gAnt = 0;   // seleccion actual y previa
+static Ser* gArra = 0;               // nodo arrastrado
+static float gDOffX, gDOffY;          // anclaje del arrastre
+static int   gSlid = 0;               // arrastrando un slider
+
 // ---- [E] escritor unico: ejecuta la cola ------------------------------------
 static void escritor() {
     while (oTail != oHead) {
@@ -1356,28 +1387,82 @@ static void escritor() {
             gCamX += o->r[0];
             gCamY += o->r[1];
             gCamVer++;
+        } else if (o->k == 9) {                  // clonar rama (deep copy)
+            Ser* t = o->t;
+            if (t && t->tc != 0 && t->tc != 'r' && t->fol) {
+                Ser* c2 = clonaSer(t, t->fol);
+                if (c2) {
+                    ccS(c2, CI_X, ccG(t, CI_X) + 30 * QZ);
+                    ccS(c2, CI_Y, ccG(t, CI_Y) + 26 * QZ);
+                    lgE(c2, -3, 0, 0);           // crear: U lo quita entero
+                    if (gObj && gObj->tc != 0 && gObj != c2)
+                        ccS(gObj, CI_SEL, 0);
+                    gAnt = gSel; gSel = c2; gObj = c2;
+                    syncInsp();
+                }
+            }
         }
         oTail = oTail + 1;
     }
     for (long z = 0; z < 256; z++) oRing[z].tx = 0;   // tras drenar todo
 }
 // ---- [I] interaccion (mis para todos) ---------------------------------------
-static Ser* gSel = 0; static Ser* gAnt = 0;   // seleccion actual y previa
-static Ser* gArra = 0;               // nodo arrastrado
-static float gDOffX, gDOffY;          // anclaje del arrastre
-static int   gSlid = 0;               // arrastrando un slider
 
 static long esDe(Ser* ap, Ser* t) {      // ap vive dentro de la rama t
     for (; ap; ap = ap->fol) if (ap == t) return 1;
     return 0;
 }
 static void borraApuntados(Ser* t) {     // ser colgado en la rama borrada
-    Ser** ap[16] = { &gObj, &gSel, &gAnt, &gInsp, &gSes, &gForm, &gCamNodo,
+    Ser** ap[19] = { &gObj, &gSel, &gAnt, &gInsp, &gSes, &gForm, &gCamNodo,
                      &gColNodo, &gInspEd, &gInspVis, &gInspPn, &gInspR,
-                     &gInspG, &gInspB, &gInspRad, &gAyTxt };
-    for (long i = 0; i < 16; i++) if (esDe(*ap[i], t)) *ap[i] = 0;
+                     &gInspG, &gInspB, &gInspRad, &gAyTxt,
+                     &gMenu, &gInsp2, &gFilTxt };
+    for (long i = 0; i < 19; i++) if (esDe(*ap[i], t)) *ap[i] = 0;
+    gFilLast = 0;                        // el foco nuevo reordena fila 0
     if (!gObj) gEdito = 0;
 }
+static double* filaDe(Ser* t, long idx, long* nfOut) {   // fila SM elegida
+    long nf = 0;
+    double* hit = 0;
+    if (t)
+        for (long m = 0; m < t->nM; m++) {
+            if (!t->M[m] || !t->TM[m] || t->TM[m][0] != 'f') continue;
+            if (!hit && nf == idx) hit = (double*)t->M[m];
+            nf++;
+        }
+    if (nfOut) *nfOut = nf;
+    return hit;
+}
+static void lgFila(Ser* t, double* f) {  // entra la fila al log antes de tocarla
+    lgE(t, -5, 0, 0);
+    struct Lg* e = &gLg[gLgN - 1];
+    for (long i = 0; i < 6; i++) e->row[i] = f[i];
+    e->olb = (char*)f;                   // solo a los fines de validar vigencia
+}
+static Ser* clonaHasta(Ser* t, Ser* fol, long nivel) {   // copia profunda
+    if (!t || t->tc == 0 || nivel > 8) return 0;
+    char n2c[3]; nvoN2(n2c, t->tc);
+    char lbc[64];
+    long nl = 0;
+    if (t->lb) while (t->lb[nl] && nl < 60) { lbc[nl] = t->lb[nl]; nl++; }
+    lbc[nl] = 0;
+    if (nl < 59) { lbc[nl] = '2'; lbc[nl + 1] = 0; }
+    Ser* s = serCr(fol, t->tc, n2c, lbc);
+    for (long i = 0; i < CI_MAX; i++) s->C[i] = t->C[i];
+    s->ulti = t->ulti;
+    for (long m = 0; m < t->nM; m++) {
+        if (!t->M[m] || !t->TM[m]) continue;
+        double* r = (double*)t->M[m];
+        if (t->TM[m][0] == 'f' && t->TM[m][1] == '6')
+            f6Add(s, r[0], r[1], r[2], r[3], r[4], r[5]);
+        else if (t->TM[m][0] == 'n' && t->TM[m][1] == '9')
+            n9Add(s, r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8]);
+    }
+    for (long i = 0; i < t->nA && i < 256; i++) if (t->A[i])
+        clonaHasta(t->A[i], s, nivel + 1);
+    return s;
+}
+static Ser* clonaSer(Ser* t, Ser* fol) { return clonaHasta(t, fol, 0); }
 
 static void inspAplica(Ser* sl) {        // slider ligado -> objetivo elegido
     if (!gObj || !sl) return;            // cualquier slider con CI_EXT actua igual
@@ -1404,6 +1489,40 @@ static void syncAyuda() {                // barra fija: foco y teclado vistos
     snprintf(gAyTxt->lb, 195, "%s", sc);
     gAyTxt->vr++; gGen++;
 }
+static void syncDrw() {                  // panel filas: texto vivo de la fila
+    if (!gFilTxt || !gFilTxt->lb || (gEdito && gObj == gFilTxt)) return;
+    if (gObj != gFilLast) { gFilI = 0; gFilLast = gObj; }
+    long nf = 0;
+    double* f = filaDe(gObj, gFilI, &nf);
+    char sc[160];
+    if (gObj && f) {
+        static const char* NC[14] = { "X", "Y", "W", "H", "R", "G", "B",
+                                      "A", "AB", "FLG", "VAL", "RED",
+                                      "EXT", "SEL" };
+        static const char* OP[6] = { "SET", "ADD", "XOR", "CLI", "MUL",
+                                     "CRB" };
+        static const char* CN[4] = { "SI", "<", ">", "=" };
+        char cci[12], cdst[24];
+        long ci2 = (long)f[1];
+        snprintf(cci, sizeof(cci), "%s", (ci2 >= 0 && ci2 < CI_MAX) ? NC[ci2]
+                                                                   : "?");
+        long d2 = (long)f[4];
+        if (d2 >= 0)
+            snprintf(cdst, sizeof(cdst), "%s",
+                     (d2 < CI_MAX) ? NC[d2] : "?");
+        else
+            snprintf(cdst, sizeof(cdst), "fol.%s",
+                     (-d2 - 1 >= 0 && -d2 - 1 < CI_MAX) ? NC[-d2 - 1] : "?");
+        snprintf(sc, sizeof(sc), "FILA %ld/%ld  %s  CI=%s  O=%s  DST=%s  ARG=%ld",
+                 (nf > 0) ? (gFilI % nf) + 1 : 0, nf,
+                 CN[(long)f[0] & 3], cci, OP[(long)f[3] % 6], cdst, (long)f[5]);
+    } else {
+        snprintf(sc, sizeof(sc), "FILA -/-  (el nodo con foco no tiene filas)");
+    }
+    if (strcmp(sc, gFilTxt->lb) == 0) return;
+    snprintf(gFilTxt->lb, 195, "%s", sc);
+    gFilTxt->vr++; gGen++;
+}
 static void syncInsp() {                 // inspector refleja al objetivo
     if (!gObj || !gInsp) return;
     ccS(gObj, CI_SEL, 1);
@@ -1421,6 +1540,46 @@ static void syncInsp() {                 // inspector refleja al objetivo
     }
 }
 
+static void pisaDerecho(float mx, float my) {    // boton derecho: menu
+    if (g3D) return;
+    if (gMenu && (ccG(gMenu, CI_FLG) & 1) &&
+        mx >= (float)ccG(gMenu, CI_X) / QZ &&
+        mx <= (float)(ccG(gMenu, CI_X) + ccG(gMenu, CI_W)) / QZ &&
+        my >= (float)ccG(gMenu, CI_Y) / QZ &&
+        my <= (float)(ccG(gMenu, CI_Y) + ccG(gMenu, CI_H)) / QZ) {
+        ccS(gMenu, CI_FLG, 0);           // abierto encima: se cierra
+        return;
+    }
+    if (!gMenu) return;
+    lgEmp();
+    Ser* s = elige(mx, my);
+    if (s && !esDe(s, gInsp) && !esDe(s, gMenu) && !esDe(s, gInsp2)) {
+        if (gObj && gObj->tc != 0 && gObj != s) ccS(gObj, CI_SEL, 0);
+        gAnt = gSel; gSel = s; gObj = s; gFilI = 0;
+        syncInsp();
+    }
+    float mw = (float)ccG(gMenu, CI_W) / QZ, mh = (float)ccG(gMenu, CI_H) / QZ;
+    float nx = mx + 2, ny = my + 2;
+    if (nx + mw > (float)gW) nx = (float)gW - mw;
+    if (ny + mh > (float)gH) ny = (float)gH - mh;
+    ccS(gMenu, CI_X, (long)(nx < 0 ? 0 : nx) * QZ);
+    ccS(gMenu, CI_Y, (long)(ny < 0 ? 0 : ny) * QZ);
+    ccS(gMenu, CI_FLG, ccG(gMenu, CI_FLG) | 1);
+}
+static void pisaDoble(float mx, float my) {      // doble clic: fijar (pin)
+    if (g3D) return;
+    Ser* s = elige(mx, my);
+    if (!s || s->tc == 'r') return;
+    lgEmp();
+    lgE(s, CI_FLG, ccG(s, CI_FLG), 0);
+    ccS(s, CI_FLG, ccG(s, CI_FLG) ^ 8);
+    mandaAlFrente(s);
+    gAnt = gSel; gSel = s;
+    if (gObj && gObj->tc != 0 && gObj != s) ccS(gObj, CI_SEL, 0);
+    gObj = s; gFilI = 0;
+    syncInsp();
+    if (gMenu) ccS(gMenu, CI_FLG, 0);
+}
 static __attribute__((unused)) void pisaRaton(float mx, float my) {
     if (g3D) {                           // 3D: clic elige el tablero
         lgEmp();
@@ -1441,7 +1600,8 @@ static __attribute__((unused)) void pisaRaton(float mx, float my) {
     gAnt = gSel;
     gSel = s;
     long enI = 0;
-    for (Ser* p = s; p; p = p->fol) if (p == gInsp) { enI = 1; break; }
+    for (Ser* p = s; p; p = p->fol)
+        if (p == gInsp || p == gMenu || p == gInsp2) { enI = 1; break; }
     if (!enI) {                              // fuera del inspector: nuevo objetivo
         if (gObj && gObj != s) ccS(gObj, CI_SEL, 0);
         gObj = s;
@@ -1489,7 +1649,7 @@ static __attribute__((unused)) void pisaRaton(float mx, float my) {
                                                : (ccG(gObj, CI_FLG) & ~8));
     }
     if (s == gInspEd) gEdito = (ccG(s, CI_FLG) & 2) ? 1 : 0;
-    if (s->tc == 'p') {
+    if (s->tc == 'p' && s != gMenu) {    // el menu no colapsa con el clic
         lgE(s, CI_ABI, ccG(s, CI_ABI), 0);
         ccS(s, CI_ABI, ccG(s, CI_ABI) ^ 1);
     }
@@ -1502,6 +1662,47 @@ static __attribute__((unused)) void pisaRaton(float mx, float my) {
         else if (v == 3) { if (obj) ordP(2, obj, 0, 0, 0, 0, 0, 0); }
         else if (v == 4) ordP(4, 0, 0, 0, 0, 0, 0, 0);
         else if (v == 5) ordCr('q', gSes);
+        else if (v == 6 && gObj && gObj->tc != 0) {          // menu: fijar
+            lgE(gObj, CI_FLG, ccG(gObj, CI_FLG), 0);
+            ccS(gObj, CI_FLG, ccG(gObj, CI_FLG) ^ 8);
+        }
+        else if (v == 7 && gObj && gObj->tc != 0)            // menu: al frente
+            ordP(3, gObj, 0, 0, 0, 0, 0, 0);
+        else if (v == 8 && gObj && gObj->tc != 0)            // menu: clonar
+            ordP(9, gObj, 0, 0, 0, 0, 0, 0);
+        else if (v == 9 && gObj && gObj->tc != 0)            // menu: borrar
+            ordP(2, gObj, 0, 0, 0, 0, 0, 0);
+        else if (v == 10 && gInsp2)                          // menu: filas si/no
+            ccS(gInsp2, CI_FLG, (ccG(gInsp2, CI_FLG) & 1)
+                               ? (ccG(gInsp2, CI_FLG) & ~1)
+                               : (ccG(gInsp2, CI_FLG) | 1));
+        else if (v == 18 && gMenu)                           // menu: cerrar
+            ccS(gMenu, CI_FLG, 0);
+        else if (v >= 11 && v <= 17 && gObj && gObj->tc != 0) {
+            long nf = 0;
+            double* f = filaDe(gObj, gFilI, &nf);
+            if (v == 11) {                           // FILA: cicla la elegida
+                if (nf > 0) gFilI = (gFilI + 1) % nf;
+            } else if (f) {
+                lgFila(gObj, f);                     // U repone la fila entera
+                if (v == 12) f[0] = (double)(((long)f[0] + 1) & 3);
+                else if (v == 13) f[1] = (double)(((long)f[1] + 1) % CI_MAX);
+                else if (v == 14) f[3] = (double)(((long)f[3] + 1) % 6);
+                else if (v == 15) {                  // DST: propio -> fol -> propio
+                    long d2 = (long)f[4];
+                    if (d2 >= 0) d2++; else d2--;
+                    if (d2 > CI_MAX - 1) d2 = -1;
+                    if (d2 < -(long)CI_MAX) d2 = 0;
+                    f[4] = (double)d2;
+                }
+                else if (v == 16) f[5] += (double)64;
+                else if (v == 17) f[5] -= (double)64;
+                if (v == 16 || v == 17) exRows(gObj);
+                else { gObj->vr++; gGen++; }
+            }
+        }
+        if (gMenu && s != gMenu && esDe(s, gMenu))   // accion -> cierra el menu
+            ccS(gMenu, CI_FLG, 0);
     }
     exRows(s);
 }
@@ -1538,6 +1739,10 @@ static __attribute__((unused)) void tecla(char k) {
         if (k == '-') { g3Zm *= 0.87f; if (g3Zm < 0.3f) g3Zm = 0.3f; return; }
     }
     if (k == 'U') { deshacer(); return; }          // deshacer: ultimo grupo
+    if (k == 'K') {                                // clon del objetivo
+        if (gObj) ordP(9, gObj, 0, 0, 0, 0, 0, 0);
+        return;
+    }
     if (k == 'C') ordP(8, 0, -gCamX, -gCamY, 0, 0, 0, 0);   // camara a origen
     lgEmp();                                 // una tecla = un grupo
     if (gObj) {
@@ -1684,6 +1889,82 @@ static void desEscenaRoot() {
     ccS(gRoot, CI_W, gW * QZ);
     ccS(gRoot, CI_H, gH * QZ);
     ccS(gRoot, CI_FLG, 0);
+}
+static Ser* esteMeta(const char* lb) {   // panel de esquema que volvio del archivo
+    if (!gRoot) return 0;
+    for (long i = 0; i < gRoot->nA; i++) {
+        Ser* q = gRoot->A[i];
+        if (q && q->tc == 'p' && q->lb && strcmp(q->lb, lb) == 0) return q;
+    }
+    return 0;
+}
+static void linkeaMeta() {               // re-vincula menu e inspector si el
+    Ser* m = esteMeta("Menu");           // archivo DEL QUE VENIMOS ya los tenia:
+    if (m) gMenu = m;                    // sin esto quedan duplicados al cargar
+    Ser* r = esteMeta("Filas SM");
+    if (r) {
+        gInsp2 = r;
+        gFilTxt = 0;
+        for (long i = 0; i < r->nA; i++)
+            if (r->A[i] && r->A[i]->tc == 'l' && r->A[i]->lb) {
+                gFilTxt = r->A[i];
+                if (gFilTxt->lb) xMe(gFilTxt->lb);   // syncDrw escribe hasta 195
+                gFilTxt->lb = (char*)xM(200);
+                gFilTxt->lb[0] = 0;
+                break;
+            }
+        if (!gFilTxt) gInsp2 = 0;
+    }
+    if (gMenu) ccS(gMenu, CI_FLG, ccG(gMenu, CI_FLG) & ~1);   // arranca cerrado
+}
+static void creaMenu() {                 // menu contextual: acciones reales
+    if (gMenu || !gRoot) return;
+    gMenu = serCr(gRoot, 'p', "pM2", "Menu");
+    ccS(gMenu, CI_X, (gW - 140) * QZ); ccS(gMenu, CI_Y, (gH - 160) * QZ);
+    ccS(gMenu, CI_W, 130 * QZ); ccS(gMenu, CI_H, 134 * QZ);
+    ccS(gMenu, CI_R, 0.12f * QZ); ccS(gMenu, CI_G, 0.14f * QZ);
+    ccS(gMenu, CI_B, 0.22f * QZ);
+    ccS(gMenu, CI_A, QZ); ccS(gMenu, CI_FLG, 0); ccS(gMenu, CI_RED, 8);
+    ccS(gMenu, CI_ABI, 1);               // abierto: sin esto el pick no baja
+
+    static const char* NB[5] = { "FIX", "FRENTE", "CLON", "BORRAR", "FILAS" };
+    for (long i = 0; i < 5; i++) {
+        Ser* e = serCr(gMenu, 'e', "mE", NB[i]);
+        ccS(e, CI_X, 6 * QZ); ccS(e, CI_Y, (20 + i * 23) * QZ);
+        ccS(e, CI_W, 118 * QZ); ccS(e, CI_H, 19 * QZ);
+        ccS(e, CI_R, 0.2f * QZ); ccS(e, CI_G, 0.4f * QZ); ccS(e, CI_B, 0.6f * QZ);
+        ccS(e, CI_A, QZ); ccS(e, CI_FLG, 1 | 4); ccS(e, CI_RED, 6);
+        ccS(e, CI_VAL, (long)(6 + i));
+    }
+}
+static void creaFilas() {                // inspector de filas SM: editables
+    if (gInsp2 || !gRoot) return;
+    gInsp2 = serCr(gRoot, 'p', "pF2", "Filas SM");
+    ccS(gInsp2, CI_X, 16 * QZ); ccS(gInsp2, CI_Y, 372 * QZ);
+    ccS(gInsp2, CI_W, 260 * QZ); ccS(gInsp2, CI_H, 100 * QZ);
+    ccS(gInsp2, CI_R, 0.13f * QZ); ccS(gInsp2, CI_G, 0.11f * QZ);
+    ccS(gInsp2, CI_B, 0.19f * QZ);
+    ccS(gInsp2, CI_A, QZ); ccS(gInsp2, CI_FLG, 1 | 8); ccS(gInsp2, CI_ABI, 1);
+    ccS(gInsp2, CI_RED, 8);
+    gFilTxt = serCr(gInsp2, 'l', "fT", "FILA -/-");
+    if (gFilTxt->lb) xMe(gFilTxt->lb);            // syncDrw escribe hasta 195:
+    gFilTxt->lb = (char*)xM(200); gFilTxt->lb[0] = 0;   // no basta el xSt del ser
+    ccS(gFilTxt, CI_X, 6 * QZ); ccS(gFilTxt, CI_Y, 20 * QZ);
+    ccS(gFilTxt, CI_R, 0.9f * QZ); ccS(gFilTxt, CI_G, 0.85f * QZ);
+    ccS(gFilTxt, CI_B, 0.6f * QZ); ccS(gFilTxt, CI_A, QZ); ccS(gFilTxt, CI_FLG, 1);
+    static const char* NB[7] = { "FILA", "COND", "CI", "OP", "DST", "MAS", "MENOS" };
+    for (long i = 0; i < 7; i++) {
+        Ser* e = serCr(gInsp2, 'e', "fE", NB[i]);
+        ccS(e, CI_X, (4 + i * 35) * QZ); ccS(e, CI_Y, 56 * QZ);
+        ccS(e, CI_W, 33 * QZ); ccS(e, CI_H, 18 * QZ);
+        ccS(e, CI_R, 0.2f * QZ); ccS(e, CI_G, 0.5f * QZ); ccS(e, CI_B, 0.4f * QZ);
+        ccS(e, CI_A, QZ); ccS(e, CI_FLG, 1 | 4); ccS(e, CI_RED, 6);
+        ccS(e, CI_VAL, (long)(11 + i));
+    }
+    Ser* h2 = serCr(gInsp2, 'l', "fH", "clic nodo: clica aca y edita su fila");
+    ccS(h2, CI_X, 6 * QZ); ccS(h2, CI_Y, 78 * QZ);
+    ccS(h2, CI_R, QZ); ccS(h2, CI_G, QZ); ccS(h2, CI_B, QZ);
+    ccS(h2, CI_A, QZ); ccS(h2, CI_FLG, 1);
 }
 static void escModelo() {                   // escena de arranque
     desEscenaRoot();
@@ -1890,11 +2171,13 @@ static void escModelo() {                   // escena de arranque
     ccS(gAyTxt, CI_R, QZ); ccS(gAyTxt, CI_G, 0.75f * QZ); ccS(gAyTxt, CI_B, 0.15f * QZ);
     ccS(gAyTxt, CI_A, QZ); ccS(gAyTxt, CI_FLG, 1);
     Ser* ay2 = serCr(pA, 'l', "yK",
-        "FLEC:camara  C:camara 0  U:deshacer todo  L:etiqueta  V:visible  "
-        "P:pin  D:borrar(vuelve con U)  G:3D  F/B/Z/X:orden z");
+        "FLEC:camara  U:deshacer todo  L:etiqueta  V-P-D en menu derecho  "
+        "K:clonar  G:3D  DBL:fija  F/B/Z/X:orden z");
     ccS(ay2, CI_X, 6 * QZ); ccS(ay2, CI_Y, 19 * QZ);
     ccS(ay2, CI_R, 0.9f * QZ); ccS(ay2, CI_G, 0.9f * QZ); ccS(ay2, CI_B, 0.95f * QZ);
     ccS(ay2, CI_A, QZ); ccS(ay2, CI_FLG, 1);
+    creaMenu();
+    creaFilas();
 }
 
 // ---- [T] pruebas (sin ventana) ------------------------------------------------
@@ -2000,7 +2283,7 @@ static void pruebas() {
            gAyTxt && gAyTxt->lb ? gAyTxt->lb : "-");
     gObj = 0; ccS(pk, CI_SEL, 0); syncAyuda();
     Ser* cam = serCr(gRoot, 'm', "cT", "Cam");   // camara de prueba (zona libre:
-    ccS(cam, CI_X, 40 * QZ); ccS(cam, CI_Y, 460 * QZ);   // el inspector pin tapa)
+    ccS(cam, CI_X, 280 * QZ); ccS(cam, CI_Y, 460 * QZ);  // entre paneles fijos
     ccS(cam, CI_W, 40 * QZ); ccS(cam, CI_H, 20 * QZ);
     ccS(cam, CI_FLG, 1);
     unsigned int fr[8];                        // frame 4x2: azul arriba rojo abajo
@@ -2008,14 +2291,14 @@ static void pruebas() {
     for (long i = 4; i < 8; i++) fr[i] = 0xffff0000u;
     ordFeed(cam, fr, 4, 2); escritor();
     pintaTodo();
-    unsigned int cv = gImg[470 * gW + 60];
+    unsigned int cv = gImg[470 * gW + 300];
     printf("camara muestra frame: %s\n",
            ((cv >> 16) & 255) == 255 ? "PASA" : "FALLA");
     gRq = 0; pintaTodo();
     printf("cache camara sin cambios: %s\n", gRq == 0 ? "PASA" : "FALLA");
     for (long i = 0; i < 8; i++) fr[i] = 0xff00ff00u;   // todo verde
     ordFeed(cam, fr, 4, 2); escritor(); pintaTodo();
-    unsigned int cv2 = gImg[470 * gW + 60];
+    unsigned int cv2 = gImg[470 * gW + 300];
     printf("camara fuente viva: %s\n",
            ((cv2 >> 8) & 255) == 255 && !((cv2 >> 16) & 255) ? "PASA" : "FALLA");
     Ser* z1 = serCr(gRoot, 'b', "z1", "z1");
@@ -2313,6 +2596,7 @@ static void pruebas() {
         gInsp = 0; gInspEd = 0; gInspVis = 0; gInspPn = 0;
         gInspR = 0; gInspG = 0; gInspB = 0; gInspRad = 0;
         gAyTxt = 0; gObj = 0;                        // sin nodos fantasma al recargar
+        gMenu = 0; gInsp2 = 0; gFilTxt = 0; gFilI = 0; gFilLast = 0;
         long rr = desEscena(gRuta);
         Ser* sld1 = 0;                       // slider al recargar: por tipo
         for (long i = 0; gRoot && !sld1 && i < gRoot->nA; i++) {
@@ -2384,6 +2668,152 @@ static void pruebas() {
                gRoot ? ccG(gRoot, CI_VAL) : -1,
                gRoot && gRoot->lb ? gRoot->lb : "(nil)");
     }
+    {                                    // reconstruimos el demo completo:
+        while (gRoot->nA > 0) {          // aca viven los 5 controles nuevos
+            Ser* h = gRoot->A[gRoot->nA - 1];
+            gRoot->nA--;
+            serAl(h);
+        }
+        serAl(gRoot); gRoot = 0;
+        gSes = 0; gForm = 0; gCamNodo = 0; gColNodo = 0;
+        gInsp = 0; gInspEd = 0; gInspVis = 0; gInspPn = 0;
+        gInspR = 0; gInspG = 0; gInspB = 0; gInspRad = 0;
+        gAyTxt = 0; gObj = 0; gSel = 0; gAnt = 0; gArra = 0; gEdito = 0;
+        gMenu = 0; gInsp2 = 0; gFilTxt = 0; gFilI = 0; gFilLast = 0;
+        escModelo();
+    }
+    {                                    // clon profundo (op 9 / tecla K)
+        Ser* rb = 0;
+        for (long i = 0; i < gRoot->nA && !rb; i++) {
+            Ser* p2 = gRoot->A[i];
+            if (!p2 || p2->tc != 'p') continue;
+            for (long j = 0; j < p2->nA; j++)
+                if (p2->A[j] && p2->A[j]->lb &&
+                    strcmp(p2->A[j]->lb, "Rojo") == 0) { rb = p2->A[j]; break; }
+        }
+        long fi = 0;
+        double* f = filaDe(rb, 0, &fi);
+        long v0 = gVivos;
+        ordP(9, rb, 0, 0, 0, 0, 0, 0);
+        escritor();
+        Ser* cl = 0;
+        for (long j = 0; j < rb->fol->nA; j++) {
+            Ser* q = rb->fol->A[j];
+            if (q != rb && q->lb && strcmp(q->lb, "Rojo2") == 0) { cl = q; break; }
+        }
+        printf("clon profundo nace: %s (nM=%ld arg=%ld x=%ld)\n",
+               (cl && gVivos == v0 + 1 && cl->nM == fi ? "PASA" : "FALLA"),
+               cl ? cl->nM : -1,
+               cl && cl->nM == 1 ? (long)((double*)cl->M[0])[5] / QZ : -1,
+               cl ? (ccG(cl, CI_X) - ccG(rb, CI_X)) / QZ : -1);
+        deshacer();
+        escritor();
+        printf("clon deshace: %s (vivos %ld -> %ld)\n",
+               gVivos == v0 ? "PASA" : "FALLA", v0, gVivos);
+        (void)f;
+    }
+    {                                    // menu de boton derecho: FIX hace pin
+        Ser* obj0 = gObj ? gObj : 0;
+        pisaDerecho(100, 100);           // preselecciona lo que este ahi
+        printf("menu derecho abre: %s\n",
+               gMenu && (ccG(gMenu, CI_FLG) & 1) ? "PASA" : "FALLA");
+        printf("menu preselecciona: %s\n",
+               (gObj && gObj != obj0) ? "PASA" : "FALLA");
+        Ser* obj = gObj;
+        long fl0 = ccG(obj, CI_FLG);
+        float mfx = (float)ccG(gMenu, CI_X) / QZ + 20;
+        float mfy = (float)ccG(gMenu, CI_Y) / QZ + 28;
+        pisaRaton(mfx, mfy);             // FIX = VAL 6
+        printf("menu FIX pin: %s (flg %ld -> %ld)\n",
+               (ccG(obj, CI_FLG) & 8) ? "PASA" : "FALLA", fl0, ccG(obj, CI_FLG));
+        printf("menu FIX cierra: %s\n",
+               (ccG(gMenu, CI_FLG) & 1) ? "FALLA" : "PASA");
+        deshacer();
+        escritor();
+        printf("menu FIX deshace: %s (flg %ld)\n",
+               (ccG(obj, CI_FLG) & 8) ? "FALLA" : "PASA", ccG(obj, CI_FLG));
+        pisaDerecho(100, 100);           // se abre de nuevo (el FIX lo cerro)
+        float mnx = (float)ccG(gMenu, CI_X) / QZ + 40;
+        float mny = (float)ccG(gMenu, CI_Y) / QZ + 40;
+        pisaDerecho(mnx, mny);           // derecho abierto encima: se cierra
+        printf("menu se cierra encima: %s\n",
+               (ccG(gMenu, CI_FLG) & 1) ? "FALLA" : "PASA");
+    }
+    {                                    // filas SM editables + deshacer fila
+        Ser* rb = 0;
+        for (long j = 0; j < gMenu->fol->nA; j++) {
+            Ser* p2 = gMenu->fol->A[j];
+            if (p2 && p2->tc == 'p') {
+                for (long i = 0; i < p2->nA; i++)
+                    if (p2->A[i] && p2->A[i]->lb &&
+                        strcmp(p2->A[i]->lb, "Rojo") == 0) { rb = p2->A[i]; break; }
+            }
+            if (rb) break;
+        }
+        gObj = rb; gSel = rb; syncInsp();
+        gFilI = 0; gFilLast = 0;
+        long nf = 0;
+        double* f = filaDe(rb, 0, &nf);
+        printf("filaRojo visible en panel: %s\n", f && nf == 1 ? "PASA" : "FALLA");
+        syncDrw();
+        printf("texto filas sigue: %s (%s)\n",
+               gFilTxt && gFilTxt->lb &&
+               strncmp(gFilTxt->lb, "FILA 1/1", 8) == 0 ? "PASA" : "FALLA",
+               gFilTxt && gFilTxt->lb ? gFilTxt->lb : "(nil)");
+        float cx = (float)ccG(gInsp2, CI_X) / QZ + 4 + 35 + 16;   // COND: VAL 12
+        float cy = (float)ccG(gInsp2, CI_Y) / QZ + 56 + 9;
+        pisaRaton(cx, cy);
+        printf("fila COND cicla: %s (cond %ld -> %ld)\n",
+               f && (long)f[0] == 1 ? "PASA" : "FALLA", 0L, f ? (long)f[0] : -1L);
+        deshacer();
+        escritor();
+        printf("fila COND deshace: %s (cond %ld)\n",
+               f && (long)f[0] == 0 ? "PASA" : "FALLA", f ? (long)f[0] : -1);
+        float mx2 = (float)ccG(gInsp2, CI_X) / QZ + 4 + 5 * 35 + 16;  // MAS: VAL 16
+        pisaRaton(mx2, cy);
+        printf("fila MAS arg: %s (arg %ld)\n",
+               f && (long)f[5] == QZ + 64 ? "PASA" : "FALLA",
+               f ? (long)f[5] : -1);
+        deshacer();
+        escritor();
+        printf("fila MAS deshace: %s (arg %ld)\n",
+               f && (long)f[5] == QZ ? "PASA" : "FALLA", f ? (long)f[5] : -1);
+    }
+    {                                    // doble clic: fijar (pin) y despin
+        Ser* obj = 0;
+        for (long i = 0; i < gRoot->nA && !obj; i++) {
+            Ser* p2 = gRoot->A[i];
+            if (p2 && p2->tc == 'p' && p2->lb && strcmp(p2->lb, "Demo") == 0)
+                obj = p2;
+        }
+        Ser* rb = 0;
+        for (long i = 0; i < obj->nA; i++)
+            if (obj->A[i] && obj->A[i]->lb && strcmp(obj->A[i]->lb, "Rojo") == 0)
+                rb = obj->A[i];
+        long fl0 = ccG(rb, CI_FLG);
+        float bx = (float)ccG(rb, CI_X) / QZ + (float)ccG(rb->fol, CI_X) / QZ + 30;
+        float by = (float)ccG(rb, CI_Y) / QZ + (float)ccG(rb->fol, CI_Y) / QZ + 10;
+        pisaDoble(bx, by);
+        printf("doble clic fija: %s (flg %ld -> %ld)\n",
+               (ccG(rb, CI_FLG) & 8) ? "PASA" : "FALLA",
+               (long)(fl0 & 8 ? 8 : 0), (long)ccG(rb, CI_FLG));
+        pisaDoble(bx, by);
+        printf("doble clic suelta: %s\n",
+               (ccG(rb, CI_FLG) & 8) ? "FALLA" : "PASA");
+    }
+    {                                    // organos meta-UI reaceden si faltan
+        gMenu = 0; gInsp2 = 0; gFilTxt = 0;
+        long na0 = gRoot->nA;
+        linkeaMeta();
+        printf("linkea re-vincula los del archivo: %s\n",
+               (gMenu && gInsp2 && gFilTxt) ? "PASA" : "FALLA");
+        printf("linkea no duplica: %s (nA %ld -> %ld)\n",
+               gRoot->nA == na0 ? "PASA" : "FALLA", na0, gRoot->nA);
+        gMenu = 0; gInsp2 = 0; gFilTxt = 0;
+        creaMenu(); creaFilas();         // sin rastro en el archivo: se crean
+        printf("creaMenu/creaFilas reaciden: %s\n",
+               (gMenu && gInsp2 && gFilTxt && gRoot->nA == na0 + 2) ? "PASA" : "FALLA");
+    }
     FILE* o = fopen("ser_check.ppm", "wb");
     if (o) {
         fprintf(o, "P6\n%ld %ld\n255\n", gW, gH);
@@ -2424,6 +2854,7 @@ static LRESULT CALLBACK wnProc(HWND v, UINT m, WPARAM w, LPARAM l) {
         if (g3D) {                       // orbita: arrastrar = girar la camara
             static long u3x = -1, u3y = -1;
             long mx2 = (long)(short)(l & 65535), my2 = (long)(short)((l >> 16) & 65535);
+            if (!(w & 1)) { u3x = -1; u3y = -1; return 0; }
             if (u3x >= 0) {
                 g3Az += (float)(mx2 - u3x) * 0.012f;
                 g3El += (float)(my2 - u3y) * 0.012f;
@@ -2464,6 +2895,14 @@ static LRESULT CALLBACK wnProc(HWND v, UINT m, WPARAM w, LPARAM l) {
         SetCapture(gVen);
         return 0; }
     case WM_LBUTTONUP: ReleaseCapture(); sueltoRaton(); return 0;
+    case WM_LBUTTONDBLCLK: {             // doble clic: fija (pin) el nodo
+        POINT p; GetCursorPos(&p); ScreenToClient(gVen, &p);
+        pisaDoble((float)p.x, (float)p.y);
+        return 0; }
+    case WM_RBUTTONDOWN: {               // boton derecho: menu contextual
+        POINT p; GetCursorPos(&p); ScreenToClient(gVen, &p);
+        pisaDerecho((float)p.x, (float)p.y);
+        return 0; }
     case WM_SIZE: {                      // la ventana manda su tamano: rehacer
         long nw = (long)(l & 65535), nh = (long)((l >> 16) & 65535);
         if (nw > 40 && nh > 40 && (nw != gW || nh != gH) && gImg) {
@@ -2506,7 +2945,7 @@ static LRESULT CALLBACK wnProc(HWND v, UINT m, WPARAM w, LPARAM l) {
 int PASCAL WinMain(HINSTANCE i, HINSTANCE p, LPSTR c, int s) {
     (void)p; (void)c; (void)s;
     WNDCLASSA w;
-    w.style = CS_OWNDC;
+    w.style = CS_OWNDC | CS_DBLCLKS;
     w.lpfnWndProc = wnProc;
     w.cbClsExtra = 0; w.cbWndExtra = 0;
     w.hInstance = i;
@@ -2525,6 +2964,9 @@ int PASCAL WinMain(HINSTANCE i, HINSTANCE p, LPSTR c, int s) {
     for (unsigned long i = 0; i < (unsigned long)(gW * gH); i++) gImg[i] = bgf;
     ShowWindow(gVen, 1);                 // el WM_SIZE inicial no cambia nada
     if (!desEscena(gRuta)) escModelo();
+    linkeaMeta();                        // el archivo ya los tenia: se reusan
+    if (!gMenu) creaMenu();              // organos meta-UI reaceden si faltan
+    if (!gInsp2) creaFilas();
     parArranca();                        // par vigilante: tic + fuente de camara
     BITMAPINFO bi;
     ZeroMemory(&bi, sizeof(bi));
@@ -2546,6 +2988,7 @@ int PASCAL WinMain(HINSTANCE i, HINSTANCE p, LPSTR c, int s) {
         escritor();
         tickN9(gRoot);                       // contadores vivos por cuadro
         syncAyuda();                         // barra fija sigue al foco
+        syncDrw();                           // panel filas sigue a la fila
         pintaTodo();
         bi.bmiHeader.biWidth = (long)gW;  // resize: el encabezado sigue al buffer
         bi.bmiHeader.biHeight = (long)-gH;

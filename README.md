@@ -149,7 +149,8 @@ Tres bugs viejos que se tapaban mutuamente:
 - **Crash al editar etiqueta**: eliminar un nodo (k==2, DELETE/D) nunca
   limpiaba `gObj`/`gSel`/`gAnt`/inspectores/etc: quedaban punteros
   colgando y el proximo toque pisaba memoria liberada. Ahora
-  `borraApuntados` limpia los 16 apuntadores globales antes de liberar.
+  `borraApuntados` limpia los 19 apuntadores globales (agrego: menu
+  contextual, panel de filas, texto vivo) antes de liberar.
 - **Flechas que escribian basura en la etiqueta**: en `WM_KEYDOWN` los
   codigos VK (flechas = 0x25..0x28) caian en `tecla((char)w)` y se
   insertaban como `% ' &`. Ahora los VK especiales cortan antes y solo
@@ -165,8 +166,9 @@ de liberarlo, `U` lo vuelve a su mismo padre (al hueco que dejó o al
 final); si el cementerio se llena, evacua al más viejo **purgando su
 rastro del log** (sus entradas quedan 0 y se saltan) para nunca resucitar
 memoria liberada. `D`/DELETE abre su propio grupo de undo. Undo de
-etiqueta (`-2`) devuelve el texto exacto previo. La barra de ayuda lo
-dice: `U:deshacer todo ... D:borrar(vuelve con U)`.
+etiqueta (`-2`) devuelve el texto exacto previo (y ahora la **fila SM**
+entera, ci `-5`). La barra de ayuda lo dice: `U:deshacer todo ...`
+(BORRAR esta en el menu del boton derecho y vuelve con U).
 
 ## Modo 3D de la escena (G)
 
@@ -185,6 +187,32 @@ Las etiquetas se dibujan planas encima (siempre legibles) y ámbar para
 el nodo con foco. El bbox de la escena se computa en píxeles y se
 centra: ninguna escena se va de pantalla.
 
+## Clon, menu de boton derecho y filas editables
+
+La interfaz dejo de ser dibujo sin proposito:
+
+- **Clon profundo** (tecla `K` o CLON en el menu): op `9` del escritor
+  copia la rama entera (hijos, filas `f6`/`n9`, hasta nivel 8) junto al
+  original (+30, +26), lo deja seleccionado y es deshacible con `U`.
+- **Menu de boton derecho**: `WM_RBUTTONDOWN` pre-selecciona lo que
+  esta bajo el cursor y abre un panel contextual (FIX/FRENTE/CLON/
+  BORRAR/FILAS) pegado al cursor (clamp a la ventana). FIX hace pin,
+  FRENTE es op 3, CLON es op 9, BORRAR es op 2, FILAS muestra/oculta
+  el inspector de filas. Toda accion cierra el menu; un derecho sobre
+  el menu abierto tambien lo cierra.
+- **Doble clic fija**: `WM_LBUTTONDBLCLK` (registro con `CS_DBLCLKS`)
+  toggle del pin (FLG bit 8), manda al frente y lo deja con foco.
+- **Filas SM editables desde la GUI**: panel fijado "Filas SM" que
+  muestra la fila elegida del nodo con foco (`FILA i/n COND CI O DST
+  ARG` vivo) y botones FILA (cicla fila), COND (SI/</>/=), CI (cicla
+  canal), OP (cicla op), DST (propio -> fol.k -> propio), MAS/MENOS
+  (arg ±64, ejecuta `exRows` en el acto). Cada cambio entra al log con
+  **undo de la fila entera** (ci `-5`: valores previos + puntero
+  validado contra `M[]` vivo al deshacer).
+- **Paneles meta que re-aparecen**: `linkeaMeta()` re-vincula Menu y
+  Filas SM cuando vuelven del `oroga.dbg` (sin duplicarlos); si el
+  archivo no los tenia, `creaMenu`/`creaFilas` los crean.
+
 ## Compilar
 
 Con GCC (MinGW64 en Windows):
@@ -197,7 +225,7 @@ En Dev-C++ (Proyecto Win32 GUI, C++11) o Makefile.win → target `Ser.o` +
 enlazado con `-luser32 -lgdi32`. Con ventana abre un editor de controles:
 botones, checks, sliders, redondeados, caches, sesiones anidadas.
 
-Sin modificar nada, `main()` corre primero la batería de pruebas (55/55 PASA,
+Sin modificar nada, `main()` corre primero la batería de pruebas (74/74 PASA,
 sin ventana) y escribe `ser_check.ppm` 800x520 como render de verificación.
 
 ## Formato
