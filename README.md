@@ -16,6 +16,49 @@ src/Ser.cpp    <- el sistema completo
 oroga.dbg      <- volcado de serializacion (formato N/V, se regenera)
 ```
 
+## Cuanto logrado (audit del sistema)
+
+Replanteo completo donde nada es escena cableada: una sola `struct Ser`,
+todo es **condicion + asignacion**, y cualquier "aplicacion" nace de
+filas SM que causan comportamiento (futuro: otra aplicacion = otro
+juego de filas, mismas piezas). Lo logrado, por plano:
+
+- **Nucleo**: nodos `Ser` (hijos `A[]`, canales `C[]` punto fijo
+  QZ=256, matrices `M[]/TM[]`), pool con CAS y epoch, escritor unico
+  con anillo `oRing`, deshacer por grupos (`U`), **vidas** por tipo
+  (filas op 9/10, tecla `H`).
+- **Motor SM**: filas `[cond,ci,cmp,op,dst,arg]`, ops 0..14
+  (asignacion, toggle, clip, mul, `crb` meta-UI, reserva CAS 6-8,
+  vidas 9-10, salto fsm 11, tocar 12, exportar WAV 13, grabar 14)
+  y conds 0..6 (siempre, `<`, `>`, `==`, `!=`, `<=`, `>=`); arcos al
+  fol en `ci/cmp/dst/arg` (los 3D y las variables SM viven de eso).
+- **fsm**: maquinas `tc 'f'` con estados `'p'`, paso por tic
+  (`tickN9` en ventana, `fsmPaso` a mano), **diagrama de estados**
+  pintado (chips, vivo en ambar, rieles cyan) y **editor visual de
+  saltos** (picar el chip selecciona el estado, el riel la fila op
+  11, con undo); estado vivo persistido.
+- **Importador `.sm`**: maquinas externas al arbol, variables en el
+  canal `30+N`, tecla `M`.
+- **Audio entra/sale**: mezclador `tc 'a'`, eventos por fila (op 12),
+  mezcla aditiva, exportar/cargar WAV, altavoz con bus que drena el
+  arbol (`waveOut`), grabacion de entrada (`waveIn`, fila op 14,
+  `CI_REC`), agujas de escritura y reproduccion separadas y cíclicas.
+- **GUI autodescriptiva**: inspector centrado en el objetivo con
+  datos junto al exe, etiquetas en vivo (`L`), menu de boton derecho
+  con acciones reales, ayuda que lista los atajos, pick por zonas
+  anidadas, z-orden multiple (`F/B/Z/X`), clon profundo (`K`).
+- **Contexto grafico**: ppp real medido (`cmQz`, `gFS` derivada) y
+  rescalado automatico del layout via linea `G` guardada.
+- **3D**: cubo, semiarco texturizado, posicion polar efectiva
+  (`AGL/RAD/ARC/EST`), camara global con fuente sintetica animada.
+- **Exportes**: PPM, PNG propio, doc de escena, WAV; colador de
+  campo cromatico con sliders propios.
+
+Falta: `SUB` con variable y `COND` con literal `a` en `.sm`; vidas en
+el menu derecho; arcos 360 y tuberias en 3D; JPG/impresion; colador
+serializado; tipografias del sistema; la conversion de escenas en
+aplicaciones distintas (armado de paquetes de filas por aplicacion).
+
 ## Meta-UI
 
 Todo control puede llevar filas SM que **generan otros controles**
@@ -491,11 +534,27 @@ samples float en [-1,1]) y canales propios:
   fuera de los defaults. El buffer no persiste: lo reproducible lo
   reproducen las filas, lo externo lo re-carga `J`.
 
-Falta: grabacion de entrada. Detalle del turno audio: la aguja de
-escritura (`CI_PTO`) da la vuelta al llenar el buffer (evento eterno:
-el tono nunca se corta por el final) y sin mezclador propio el
-evento cae en el bus (el primer `'a'` del arbol: el `Son` de la
-escena modelo hace de parlante para cualquier maquina).
+La SM causa el comportamiento, la escena no importa: una maquina y
+un mezclador hermanos cualesquiera son una "aplicacion" completa y
+la escena modelo no cachea ningun mecanismo. Detalles finales del
+audio: la aguja de escritura (`CI_PTO`) da la vuelta al llenar el
+buffer (evento eterno: el tono nunca se corta por el final) y sin
+mezclador propio el evento cae en el bus (el primer `'a'` vivo del
+arbol hace de parlante para cualquier maquina).
+
+## Grabacion de entrada
+
+- Fila **op 14 = grabar**: `arg` = ms pedidos; 0 = parar. Arma el
+  canal **`CI_REC` (106)** = ms pendientes de grabacion (la fsm puede
+  armar al entrar a un estado y parar al salir del siguiente).
+- `auRecibe(m, frames, n)` mete el microfono al buffer del
+  mezclador: sobrescribe desde la aguja `CI_PTO` (la misma de los
+  tonos), clip [-1,1], avanza `usados` y descuenta `CI_REC` (al
+  llegar a 0 la grabacion termino sola).
+- Solo en `_WIN32`: al armarse, `waveIn` abre la entrada 16 bits
+  mono a la sr del mezclador con 2 buffers redondos de 600 frames;
+  el hilo de 16 ms del altavoz drena los `WHDR_DONE` -> `auRecibe`. Si
+  nadie armo `CI_REC`, suelta el microfono. Requiere `-lwinmm`.
 
 ## Importador .sm: las maquinas externas entran al arbol
 
@@ -572,7 +631,7 @@ En Dev-C++ (Proyecto Win32 GUI, C++11) o Makefile.win → target `Ser.o` +
 enlazado con `-luser32 -lgdi32 -lwinmm` (`winmm` = salida a altavoz). Con ventana abre un editor de controles:
 botones, checks, sliders, redondeados, caches, sesiones anidadas.
 
-Sin modificar nada, `main()` corre primero la batería de pruebas (125/125 PASA,
+Sin modificar nada, `main()` corre primero la batería de pruebas (126/126 PASA,
 sin ventana) y escribe `ser_check.ppm` 800x520 como render de verificación.
 
 ## Formato

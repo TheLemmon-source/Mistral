@@ -156,6 +156,7 @@ static long removeD(const char* nom) {
 #define CI_PTO 103                     // [AU] audio: aguja donde escribe la voz
 #define CI_FRE 104                     // [AU] audio: frecuencia en Hz * QZ (controlable)
 #define CI_PLA 105                     // [AU] audio: aguja de reproduccion (altavoz)
+#define CI_REC 106                     // [AU] audio: ms de grabacion pendientes (0 = parada)
 
 // ---- [S] nucleo ser ---------------------------------------------------------
 static void* xM(unsigned long nb) {
@@ -617,6 +618,7 @@ static Ser* gRoot = 0;                   // raiz viva (el bus y exRows la miran)
 static double* auFil(Ser* s);            // buffer del mezclador (lazy init)
 static long auToca(Ser* m, long hz, long ms);
 static long auSaca(Ser* m, float* d, long mx);   // [AL] altavoz: drena el mix
+static void auRecibe(Ser* m, const float* fr, long n);   // [AL] entrada: el mic
 
 static Ser* auDe(Ser* s) {               // el mezclador del nodo: sube por los fol
     for (Ser* p = s; p; p = p->fol)
@@ -803,6 +805,38 @@ static void auDrena(Ser* s, float* fr, long* nf, long mx) {   // todos los 'a' v
         if (!gAlMz) gAlMz = s;
     }
     for (long i = 0; i < s->nA; i++) auDrena(s->A[i], fr, nf, mx);
+}
+__attribute__((unused))
+static Ser* auRecBusca(Ser* s) {         // un 'a' con CI_REC armada (DFS)
+    if (!s) return 0;
+    if (s->tc == 'a' && ccG(s, CI_REC) > 0) return s;
+    for (long i = 0; i < s->nA; i++) {
+        Ser* r = auRecBusca(s->A[i]);
+        if (r) return r;
+    }
+    return 0;
+}
+static void auRecibe(Ser* m, const float* fr, long n) {   // entra por el micro:
+    if (!m || m->tc != 'a' || !fr || n < 1) return;      // sobrescribe desde CI_PTO
+    double* au = auFil(m);
+    if (!au) return;
+    long cap = (long)au[1];
+    long pt = ccG(m, CI_PTO);
+    if (pt < 0 || pt >= cap) { ccS(m, CI_PTO, 0); pt = 0; }
+    for (long i = 0; i < n && pt < cap; i++, pt++) {
+        float v2 = fr[i];
+        if (v2 > 1) v2 = 1;
+        if (v2 < -1) v2 = -1;
+        au[2 + pt] = (double)v2;
+    }
+    if (pt > (long)au[0]) au[0] = (double)pt;
+    ccS(m, CI_PTO, pt);
+    long rec = ccG(m, CI_REC);                   // ms que faltan
+    if (rec > 0) {
+        long sr = ccG(m, CI_SR);
+        rec -= (n * 1000) / (sr > 0 ? sr : 22050);
+        ccS(m, CI_REC, rec > 0 ? rec : 0);       // 0: termino solo
+    }
 }
 
 // ---- [SM] importador .sm: STATE/COND/ACT/TRUE/FALSE -> maquina 'f' ---------
@@ -1063,7 +1097,7 @@ static void exRows(Ser* s) {              // ejecucion de filas SM del nodo
             else if (s->fol) hz = ccG(s->fol, -dst - 1);
             Ser* mz = auDe(s);
             if (!mz) mz = auBusca(gRoot);       // bus: sin mezclador propio, el
-            if (mz && hz > 0) {                 // del arbol (Son en el demo)
+            if (mz && hz > 0) {                 // del arbol: el bus del vivo
                 long dms = arg;
                 if (dms <= 0) dms = ccG(mz, CI_DUR);
                 if (dms > 0) auToca(mz, hz, dms);
@@ -1075,6 +1109,14 @@ static void exRows(Ser* s) {              // ejecucion de filas SM del nodo
         if (op == 13) {                  // audio: escribir el buffer a WAV
             Ser* mz = auDe(s);
             if (mz) auGuarda(mz, "ser_son.wav");
+            caSuma(CA_FIL);
+            s->vr++; gGen++;
+            continue;
+        }
+        if (op == 14) {                  // audio: arma la grabacion de entrada
+            Ser* mz = auDe(s);           // arg = ms pedidos (0 = parar)
+            if (!mz) mz = auBusca(gRoot);
+            if (mz) ccS(mz, CI_REC, arg > 0 ? arg : 0);
             caSuma(CA_FIL);
             s->vr++; gGen++;
             continue;
@@ -1970,11 +2012,80 @@ static long auPulsa(void) {                // un cuadro: drena los mixers -> spe
     if (waveOutWrite(gAlDv, h, sizeof(WAVEHDR)) != MMSYSERR_NOERROR) return 0;
     return nf;
 }
+// ---- [AL-32] entrada: waveIn 16 bits mono; 2 buffers, el mismo hilo -------
+static HWAVEIN gAlIn = 0;
+static long gReSr = 0;
+static WAVEHDR gReHd[2];
+static short* gReDat[2] = { 0, 0 };
+static long gReIx = 0;
+
+static void alRecCierra(void) {            // suelta el microfono
+    if (!gAlIn) return;
+    waveInReset(gAlIn);
+    for (long i = 0; i < 2; i++)
+        if (gReHd[i].dwFlags & WHDR_PREPARED)
+            waveInUnprepareHeader(gAlIn, &gReHd[i], sizeof(WAVEHDR));
+    waveInClose(gAlIn); gAlIn = 0; gReSr = 0;
+}
+
+static long alRecAbre(long sr) {           // la entrada a la sr del mezclador
+    if (sr < 1) sr = 22050;
+    if (gAlIn) {
+        if (gReSr == sr) return 1;
+        alRecCierra();
+    }
+    if (!gReDat[0])
+        for (long i = 0; i < 2; i++) gReDat[i] = (short*)xM(600 * sizeof(short));
+    WAVEFORMATEX wf;
+    memset(&wf, 0, sizeof(wf));
+    wf.wFormatTag = WAVE_FORMAT_PCM;
+    wf.nChannels = 1;
+    wf.nSamplesPerSec = (DWORD)sr;
+    wf.wBitsPerSample = 16;
+    wf.nBlockAlign = 2;
+    wf.nAvgBytesPerSec = (DWORD)sr * 2;
+    if (waveInOpen(&gAlIn, WAVE_MAPPER, &wf, 0, 0, CALLBACK_NULL)
+        != MMSYSERR_NOERROR) { gAlIn = 0; return 0; }
+    gReSr = sr;
+    for (long i = 0; i < 2; i++) {
+        WAVEHDR* h = &gReHd[i];
+        memset(h, 0, sizeof(WAVEHDR));
+        h->lpData = (LPSTR)gReDat[i];
+        h->dwBufferLength = (DWORD)(600 * sizeof(short));
+        if (waveInPrepareHeader(gAlIn, h, sizeof(WAVEHDR)) != MMSYSERR_NOERROR
+            || waveInAddBuffer(gAlIn, h, sizeof(WAVEHDR)) != MMSYSERR_NOERROR)
+            return 0;
+    }
+    if (waveInStart(gAlIn) != MMSYSERR_NOERROR) return 0;
+    gReIx = 0;
+    return 1;
+}
+static void auRecPulsa(void) {             // un cuadro: micro -> mezclador armado
+    if (!gRoot) return;
+    Ser* m = auRecBusca(gRoot);
+    if (!m) { alRecCierra(); return; }     // nadie armo CI_REC: suelta el micro
+    if (!alRecAbre(ccG(m, CI_SR))) return;
+    for (long i = 0; i < 2; i++) {
+        long ix = (gReIx + i) % 2;
+        WAVEHDR* h = &gReHd[ix];
+        if (!(h->dwFlags & WHDR_DONE)) continue;
+        long fr = (long)h->dwBytesRecorded / 2;
+        if (fr > 600) fr = 600;
+        if (fr > 0) {
+            float fl[600];
+            for (long j = 0; j < fr; j++) fl[j] = (float)gReDat[ix][j] / 32000.0f;
+            auRecibe(m, fl, fr);
+        }
+        waveInAddBuffer(gAlIn, h, sizeof(WAVEHDR));
+        gReIx = (ix + 1) % 2;
+    }
+}
 static DWORD __stdcall altavozHilo(void* p) {   // corre solo con ventana
     (void)p;
     while (!gParar) {
         dormir(16);
         auPulsa();
+        auRecPulsa();                      // la entrada arma/dispara con CI_REC
     }
     return 0;
 }
@@ -3937,26 +4048,6 @@ static void escModelo() {                   // escena de arranque
     ccS(ay2, CI_X, 6 * QZ); ccS(ay2, CI_Y, 19 * QZ);
     ccS(ay2, CI_R, 0.9f * QZ); ccS(ay2, CI_G, 0.9f * QZ); ccS(ay2, CI_B, 0.95f * QZ);
     ccS(ay2, CI_A, QZ); ccS(ay2, CI_FLG, 1);
-    Ser* mz = serCr(gRoot, 'a', "auS", "Son");   // mezclador vivo de la escena
-    ccS(mz, CI_X, 400 * QZ); ccS(mz, CI_Y, 240 * QZ);
-    ccS(mz, CI_W, 150 * QZ); ccS(mz, CI_H, 100 * QZ);
-    ccS(mz, CI_R, 0.08f * QZ); ccS(mz, CI_G, 0.2f * QZ); ccS(mz, CI_B, 0.15f * QZ);
-    ccS(mz, CI_A, QZ); ccS(mz, CI_FLG, 1); ccS(mz, CI_RED, 8);
-    Ser* fa = serCr(gRoot, 'f', "fT", "Ritmo");   // demo vivo: cuenta, salta, suena
-    ccS(fa, CI_X, 400 * QZ); ccS(fa, CI_Y, 110 * QZ);
-    ccS(fa, CI_W, 150 * QZ); ccS(fa, CI_H, 120 * QZ);
-    ccS(fa, CI_R, 0.12f * QZ); ccS(fa, CI_G, 0.14f * QZ); ccS(fa, CI_B, 0.22f * QZ);
-    ccS(fa, CI_A, QZ); ccS(fa, CI_FLG, 1); ccS(fa, CI_RED, 8);
-    ccS(fa, 31, 440 * QZ);               // V[1] = canal 31 de la maquina: la nota
-    Ser* ra0 = serCr(fa, 'p', "st", "paso");
-    f6Add(ra0, 0, 0.0, 0.0, 1.0, -1.0 - 30.0, 1.0);       // V[0] cuenta un paso
-    f6Add(ra0, 2, -1.0 - 30.0, 24.0, 11.0, 1.0, 0.0);     // > 24 -> entra la nota
-    Ser* ra1 = serCr(fa, 'p', "st", "nota");
-    f6Add(ra1, 0, 0.0, 0.0, 0.0, -1.0 - 30.0, 0.0);       // remonta el contador
-    f6Add(ra1, 0, 0.0, 0.0, 12.0, -1.0 - 31.0, 120.0);    // toca: 440 Hz, 120 ms
-    f6Add(ra1, 0, 0.0, 0.0, 11.0, 2.0, -1.0);             // siempre -> suelto
-    Ser* ra2 = serCr(fa, 'p', "st", "suelto");
-    f6Add(ra2, 0, 0.0, 0.0, 11.0, 0.0, -1.0);             // siempre -> paso
     creaMenu();
     creaFilas();
     creaColador();
@@ -4862,25 +4953,31 @@ static void pruebas() {
         }
         removeD("escena.sm");
     }
-    {   // ritmo: la maquina del demo vive en la escena y suena al entrar
-        while (gRoot->nA > 0) {
-            Ser* h = gRoot->A[gRoot->nA - 1];
-            gRoot->nA--;
-            serAl(h);
+    {   // sm general: la maquina y el mezclador son hermanos cualesquiera (una
+        // "aplicacion" nace de la SM, no de una escena cableada): cuenta,
+        // suena por el bus y vuelve; la escena modelo no tiene nada cacheado
+        Ser* tam = auBusca(gRoot);               // un solo bus a la vez
+        if (tam) {
+            for (long j = 0; j < gRoot->nA; j++) if (gRoot->A[j] == tam) {
+                for (long j2 = j; j2 < gRoot->nA - 1; j2++)
+                    gRoot->A[j2] = gRoot->A[j2 + 1];
+                gRoot->nA--;
+                break;
+            }
+            serAl(tam);
         }
-        serAl(gRoot); gRoot = 0;
-        gSes = 0; gForm = 0; gCamNodo = 0; gColNodo = 0; gColPnl = 0; gSel = 0; gAnt = 0; gArra = 0;
-        gInsp = 0; gInspEd = 0; gInspVis = 0; gInspPn = 0;
-        gInspR = 0; gInspG = 0; gInspB = 0; gInspRad = 0;
-        gAyTxt = 0; gObj = 0; gMenu = 0; gInsp2 = 0; gFilTxt = 0; gFilI = 0; gFilLast = 0;
-        escModelo();
-        Ser* fa = 0; Ser* mzS = 0;
-        for (long i = 0; gRoot && i < gRoot->nA; i++) {
-            Ser* q = gRoot->A[i];
-            if (!q || !q->lb) continue;
-            if (q->tc == 'f' && !strcmp(q->lb, "Ritmo")) fa = q;
-            if (q->tc == 'a' && !strcmp(q->lb, "Son")) mzS = q;
-        }
+        Ser* mzS = serCr(gRoot, 'a', "aud", "Bus");
+        Ser* fa = serCr(gRoot, 'f', "fT", "Ritmo");
+        ccS(fa, 31, 440 * QZ);                   // V-1 = canal 31: la nota
+        Ser* ra0 = serCr(fa, 'p', "st", "paso");
+        f6Add(ra0, 0.0, 0.0, 0.0, 1.0, -1.0 - 30.0, 1.0);       // V-0 cuenta
+        f6Add(ra0, 2.0, -1.0 - 30.0, 24.0, 11.0, 1.0, 0.0);     // > 24: la nota
+        Ser* ra1 = serCr(fa, 'p', "st", "nota");
+        f6Add(ra1, 0.0, 0.0, 0.0, 0.0, -1.0 - 30.0, 0.0);       // remonta
+        f6Add(ra1, 0.0, 0.0, 0.0, 12.0, -1.0 - 31.0, 120.0);    // toca por el bus
+        f6Add(ra1, 0.0, 0.0, 0.0, 11.0, 2.0, -1.0);             // siempre: suelto
+        Ser* ra2 = serCr(fa, 'p', "st", "suelto");
+        f6Add(ra2, 0.0, 0.0, 0.0, 11.0, 0.0, -1.0);             // siempre: paso
         long ok3 = fa && mzS && ccG(fa, 31) == 440 * QZ;
         long enPaso = 0;
         for (long i = 0; fa && i < 24; i++) if (fsmPaso(fa) == 0) enPaso++;
@@ -4893,13 +4990,43 @@ static void pruebas() {
         long usS = auS ? (long)auS[0] : -1;
         long p27 = fa ? fsmPaso(fa) : -1;          // suelto vuelve a paso
         long est3 = ccG(fa, CI_EST);
-        printf("ritmo suena en la escena: %s (paso %ld/24, nota %ld est %ld, "
-               "toca %ld est %ld v0 %ld usadas %ld, suelto %ld est %ld)\n",
+        printf("sm general: maquina suena por el bus: %s (paso %ld/24, "
+               "nota %ld est %ld, toca %ld est %ld v0 %ld usadas %ld, "
+               "suelto %ld est %ld)\n",
                ok3 && enPaso == 24 && p25 == 1 && est1 == 1 && p26 == 2
                && est2 == 2 && v0r == 0 && usS == 2646 && p27 == 0
                && est3 == 0 ? "PASA" : "FALLA",
                enPaso, p25, est1, p26, est2, v0r, usS, p27, est3);
     }
+    {   // grabacion: la fila op 14 arma CI_REC y auRecibe rellena el buffer
+        Ser* mz = serCr(gRoot, 'a', "aud", "RecParl");
+        f6Add(mz, 0.0, 0.0, 0.0, 14.0, 0.0, 800.0);   // op 14: armar 800 ms
+        exRows(mz);
+        long r1 = ccG(mz, CI_REC);
+        float f4[5] = { 0.1f, 0.2f, -0.1f, -0.2f, 0.5f };
+        auRecibe(mz, f4, 5);                     // el micro entra al buffer
+        double* au = auFil(mz);
+        long us = au ? (long)au[0] : -1;
+        long pt = ccG(mz, CI_PTO);
+        long s0 = au ? (long)(au[2] * 100.0) : -1;    // primera muestra
+        long s1 = au ? (long)(au[4] * 100.0) : -1;    // tercera muestra
+        f6Add(mz, 0.0, 0.0, 0.0, 14.0, 0.0, 0.0);     // op 14: parar
+        exRows(mz);
+        long r2 = ccG(mz, CI_REC);
+        printf("grabacion de entrada arma y rellena: %s (rec %ld -> %ld, "
+               "usadas %ld, aguja %ld, s0 %ld%%, s2 %ld%%)\n",
+               r1 == 800 && r2 == 0 && us == 5 && pt == 5 && s0 == 10
+               && s1 == -10 ? "PASA" : "FALLA",
+               r1, r2, us, pt, s0, s1);
+        for (long j = 0; j < gRoot->nA; j++) if (gRoot->A[j] == mz) {
+            for (long j2 = j; j2 < gRoot->nA - 1; j2++)
+                gRoot->A[j2] = gRoot->A[j2 + 1];
+            gRoot->nA--;
+            break;
+        }
+        serAl(mz);                               // sin grabador de fondo
+    }
+
     {   // rescalado automatico: cambio de contexto grafico, el layout sigue
         FILE* v = fopenD(gRuta, "wb");
         if (v) {
