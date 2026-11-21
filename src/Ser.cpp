@@ -207,9 +207,27 @@ static volatile long gTic = 0;               // tic cronologico del vigilante (p
 #define CA_ORD   4                              // ordenes drenadas por escritor
 #define CA_RES   5                              // reservas CAS tomadas
 #define CA_EXP   6                              // exportes (PPM/PNG/DOC)
+#define CA_VIDA  7                              // snapshots de vida tomados
 #define CA_N     8
 static volatile long gCa[CA_N];                 // contadores Ca[] del sistema
 static void caSuma(long i) { __sync_fetch_and_add(&gCa[i], 1); }
+
+// ---- [V] vidas: snapshots de estado por nodo y bitacora ----------------------
+#define VID_TOPE 10                            // snapshots por nodo
+#define VID_N    24                            // bitacora global de nodos
+static Ser* gVid[VID_N];                       // sinhrono: el mas reciente al final
+static long gVidN = 0;
+static long gVidSec = 0;                       // secuencia de snapshots (orden)
+static void vidaOlvida(Ser* s) {         // el nodo muerto sale de la bitacora
+    long n = gVidN;
+    for (long i = 0; i < n; )
+        if (gVid[i] == s) {
+            for (long j = i + 1; j < n; j++) gVid[j - 1] = gVid[j];
+            gVid[n - 1] = 0; n--;
+        }
+        else i++;
+    gVidN = n;
+}
 
 static Ser* serCr(Ser* fol, char tc, const char* n2, const char* lb) {
     Ser* s;
@@ -254,6 +272,7 @@ static void serAl(Ser* s) {
     s->nM = 0;
     s->tc = 0;                           // muerto: tc != 0 significa vivo
     caSuma(CA_MUER);
+    vidaOlvida(s);                       // bitacora de vidas limpiamente
     if (serPoolU >= serPoolN) {          // pool: capacidad real, no declarada
         Ser** op = (Ser**)realloc(serPool, (serPoolN + 8) * sizeof(Ser*));
         if (!op) exit(1);
@@ -320,6 +339,94 @@ static long resVivos(Ser* s) {           // slots tomados ahora
     long n = ccG(s, CI_PON), v = 0;
     for (long i = 0; i < n; i++) if (ccG(s, CI_TOP + i)) v++;
     return v;
+}
+
+// ---- [V] vidas: snapshots de C[] del nodo; bitacora global con tope ----------
+//        una vida es una matriz "vd": [nC, secuencia, C[0..nC)); cola con tope
+//        VID_TOPE por nodo; la bitacora recuerda VID_N nodos, asi H deshace
+//        el ultimo efecto global (reforma segura: se snapshottea antes).
+static long vidaN(Ser* s) {              // snapshots del nodo ahora
+    long v = 0;
+    for (long i = 0; i < s->nM; i++)
+        if (s->TM[i] && s->TM[i][0] == 'v' && s->TM[i][1] == 'd') v++;
+    return v;
+}
+static void vidaAnota(Ser* s) {          // bitacora: el nodo queda en la punta
+    long n = gVidN;
+    for (long i = 0; i < n; i++)         // ya anotado? se re-sube a la punta
+        if (gVid[i] == s) {
+            for (long j = i + 1; j < n; j++) gVid[j - 1] = gVid[j];
+            n--; break;
+        }
+    if (n >= VID_N) {                    // cola llena: el mas viejo fuera
+        for (long j = 1; j < VID_N; j++) gVid[j - 1] = gVid[j];
+        gVid[VID_N - 1] = 0;
+        n = VID_N - 1;
+    }
+    gVid[n++] = s;
+    gVidN = n;
+}
+static long vidaToma(Ser* s) {           // snapshot del estado: push con tope
+    long n = s->nC;
+    double* m = (double*)xM((unsigned long)(n + 2) * sizeof(double));
+    m[0] = (double)n;
+    m[1] = (double)(++gVidSec);          // secuencia: orden real de creacion
+    for (long i = 0; i < n; i++) m[2 + i] = (double)s->C[i];
+    if (vidaN(s) >= VID_TOPE) {          // cola: el de menor secuencia sale
+        double* vm = 0; long vi = -1; double vs = 0;
+        for (long i = 0; i < s->nM; i++) {
+            if (s->TM[i] && s->TM[i][0] == 'v' && s->TM[i][1] == 'd') {
+                double* m2 = (double*)s->M[i];
+                if (!vm || m2[1] < vs) { vm = m2; vi = i; vs = m2[1]; }
+            }
+        }
+        if (vm) { xMe(s->M[vi]); s->M[vi] = 0; s->TM[vi] = 0; }
+    }
+    long k = -1;
+    for (long i = 0; i < s->nM; i++) if (!s->M[i] || !s->TM[i]) { k = i; break; }
+    if (k < 0) { k = s->nM; if (k >= s->cM) grC(s, k); s->nM = k + 1; }
+    s->M[k] = m;
+    s->TM[k] = (char*)"vd";
+    caSuma(CA_MAT);
+    caSuma(CA_VIDA);
+    vidaAnota(s);
+    s->vr++; gGen++;
+    return vidaN(s);
+}
+static long vidaRest(Ser* s, long k, long pop) {   // k: 0 = mas nuevo
+    long ns = vidaN(s);
+    if (k < 0) k = 0;
+    if (ns < 1 || k >= ns) return 0;
+    double* ms[VID_TOPE]; double sd[VID_TOPE];       // orden de menor secuencia
+    long q = 0;
+    for (long i = 0; i < s->nM && q < VID_TOPE; i++) {
+        if (s->TM[i] && s->TM[i][0] == 'v' && s->TM[i][1] == 'd') {
+            double* m2 = (double*)s->M[i];
+            long j2 = q;
+            while (j2 > 0 && sd[j2 - 1] > m2[1]) {   // insercion: viejo -> nuevo
+                ms[j2] = ms[j2 - 1]; sd[j2] = sd[j2 - 1]; j2--;
+            }
+            ms[j2] = m2; sd[j2] = m2[1]; q++;
+        }
+    }
+    double* m = ms[ns - 1 - k];
+    if (!m) return 0;
+    long n = (long)m[0];
+    if (n > (long)s->cC) grC(s, n);
+    for (long i = 0; i < n; i++) s->C[i] = (long)m[2 + i];
+    if (s->nC < n) s->nC = n;
+    s->ulti = gTic; s->vr++; gGen++;
+    if (pop)                             // se consume: su hueco queda libre
+        for (long i = 0; i < s->nM; i++)
+            if (s->M[i] == (void*)m) { xMe(m); s->M[i] = 0; s->TM[i] = 0; break; }
+    return 1;
+}
+static long vidaDeshacer(void) {         // bitacora: el mas reciente vuelve
+    if (gVidN < 1) return 0;
+    Ser* s = gVid[gVidN - 1];
+    gVidN--; gVid[gVidN] = 0;
+    if (!s || s->tc == 0) return 0;
+    return vidaRest(s, 0, 1);            // rest + consume la vida
 }
 
 // ---- [U] deshacer: log de asignaciones por grupos ----------------------------
@@ -518,6 +625,20 @@ static void exRows(Ser* s) {              // ejecucion de filas SM del nodo
         }
         if (op == 8) {                   // confirmar el slot arg (reserva -> en uso)
             *d = resConfirma(s, arg);
+            caSuma(CA_FIL);
+            s->vr++; gGen++;
+            continue;
+        }
+        if (op == 9 || op == 10) {       // vida: snapshot (9) / rest (10); el dst
+                                         // se re-resuelve: C[] pudo crecer justo arriba
+            long res = (op == 9) ? vidaToma(s) : vidaRest(s, arg, 0);
+            d = 0;
+            if (dst >= 0 && dst < s->nC) d = &s->C[dst];
+            else if (dst < 0 && s->fol) {
+                long dk = -dst - 1;
+                if (dk >= 0 && dk < s->fol->nC) d = &s->fol->C[dk];
+            }
+            if (d) *d = res;
             caSuma(CA_FIL);
             s->vr++; gGen++;
             continue;
@@ -1942,6 +2063,10 @@ static void docRec(FILE* f, Ser* t, long prof) {     // el arbol como documento
         fprintf(f, "pool: %ld de %ld slots ocupados (epoch %ld)\n",
                 resVivos(t), ccG(t, CI_PON), resEpoch(t));
     }
+    if (vidaN(t) > 0) {
+        for (long i = 0; i <= prof; i++) fprintf(f, "  ");
+        fprintf(f, "vidas: %ld snapshots (tope %ld)\n", vidaN(t), (long)VID_TOPE);
+    }
     for (long i = 0; i < t->nA; i++) docRec(f, t->A[i], prof + 1);
 }
 static long docEscena(const char* nom) {
@@ -1951,8 +2076,8 @@ static long docEscena(const char* nom) {
     fprintf(f, "tic %ld\n", gTic);
     fprintf(f, "contadores ca ser %ld muertes %ld matrices %ld filas %ld\n",
             gCa[CA_SER], gCa[CA_MUER], gCa[CA_MAT], gCa[CA_FIL]);
-    fprintf(f, "contadores ca ordenes %ld reservas %ld exportes %ld\n",
-            gCa[CA_ORD], gCa[CA_RES], gCa[CA_EXP]);
+    fprintf(f, "contadores ca ordenes %ld reservas %ld exportes %ld vidas %ld\n",
+            gCa[CA_ORD], gCa[CA_RES], gCa[CA_EXP], gCa[CA_VIDA]);
     docRec(f, gRoot, 0);
     fclose(f);
     return 1;
@@ -2473,6 +2598,7 @@ static __attribute__((unused)) void tecla(char k) {
     if (k == 'I') { ordP(11, 0, 0, 0, 0, 0, 0, 0); return; }  // exportar PNG
     if (k == 'O') { ordP(12, 0, 0, 0, 0, 0, 0, 0); return; }  // documento de escena
     if (k == 'U') { deshacer(); return; }          // deshacer: ultimo grupo
+    if (k == 'H') { vidaDeshacer(); return; }      // H: deshacer ultima vida
     if (k == 'K') {                                // clon del objetivo
         if (gObj) ordP(9, gObj, 0, 0, 0, 0, 0, 0);
         return;
@@ -2934,8 +3060,9 @@ static void escModelo() {                   // escena de arranque
     ccS(gAyTxt, CI_R, QZ); ccS(gAyTxt, CI_G, 0.75f * QZ); ccS(gAyTxt, CI_B, 0.15f * QZ);
     ccS(gAyTxt, CI_A, QZ); ccS(gAyTxt, CI_FLG, 1);
     Ser* ay2 = serCr(pA, 'l', "yK",
-        "FLEC:camara  U:deshacer todo  L:etiqueta  V-P-D-E en menu derecho  "
-        "K:clonar  G:3D  DBL:fija  F/B/Z/X:orden z  E/I:export PPM/PNG  O:doc");
+        "FLEC:camara  U:deshacer todo  H:deshacer vida  L:etiqueta  "
+        "V-P-D-E en menu derecho  K:clonar  G:3D  DBL:fija  "
+        "F/B/Z/X:orden z  E/I:export PPM/PNG  O:doc");
     ccS(ay2, CI_X, 6 * QZ); ccS(ay2, CI_Y, 19 * QZ);
     ccS(ay2, CI_R, 0.9f * QZ); ccS(ay2, CI_G, 0.9f * QZ); ccS(ay2, CI_B, 0.95f * QZ);
     ccS(ay2, CI_A, QZ); ccS(ay2, CI_FLG, 1);
@@ -3986,6 +4113,72 @@ static void pruebas() {
         serAl(p);
         gRoot = rv;
     }
+    {   // vidas: snapshot y rest; el estado vuelve intacto
+        Ser* rv = gRoot; gRoot = 0;
+        Ser* p = serCr(0, 'p', "vf", "Vidas");
+        ccS(p, CI_VAL, 5); ccS(p, CI_X, 0);   // nodo reciclado: reset explicito
+        vidaToma(p);
+        ccS(p, CI_VAL, 99); ccS(p, CI_X, 7);  // la vida sigue: todo cambia
+        int okV = (vidaN(p) == 1 && ccG(p, CI_VAL) == 99);
+        okV = okV && vidaRest(p, 0, 0) && ccG(p, CI_VAL) == 5
+              && ccG(p, CI_X) == 0;
+        okV = okV && vidaN(p) == 1;           // rest conserva el snapshot
+        printf("vidas: snapshot y rest (estado restaurado): %s\n",
+               okV ? "PASA" : "FALLA");
+        serAl(p);
+        gRoot = rv;
+    }
+    {   // vidas: tope 10, el mas viejo sale de la cola
+        Ser* rv = gRoot; gRoot = 0;
+        Ser* p = serCr(0, 'p', "vf", "Tope");
+        for (long i = 0; i < 12; i++) { ccS(p, CI_VAL, i); vidaToma(p); }
+        int okW = (vidaN(p) == 10 && vidaRest(p, 0, 0)
+                   && ccG(p, CI_VAL) == 11);  // el mas nuevo queda
+        vidaRest(p, 9, 0);
+        okW = okW && ccG(p, CI_VAL) == 2;     // el mas viejo que sobrevive
+        printf("vidas: tope 10 (el mas viejo sale): %s\n",
+               okW ? "PASA" : "FALLA");
+        serAl(p);
+        gRoot = rv;
+    }
+    {   // filas SM de vidas: op 9 snapshot, op 10 rest
+        Ser* rv = gRoot; gRoot = 0;
+        Ser* p = serCr(0, 'p', "vf", "FilaV");
+        ccS(p, CI_VAL, 3); ccS(p, CI_EXT, 0); ccS(p, CI_SEL, 0);
+        f6Add(p, 0, 0, 0, 9, CI_EXT, 0);      // EXT = snapshots (1)
+        f6Add(p, 0, 0, 0, 0, CI_VAL, 42);     // vida sigue: VAL = 42
+        f6Add(p, 0, 0, 0, 10, CI_SEL, 0);     // rest mas reciente -> SEL = 1
+        exRows(p);
+        int okF = (ccG(p, CI_EXT) == 0 && ccG(p, CI_SEL) == 1
+                   && ccG(p, CI_VAL) == 3 && vidaN(p) == 1);
+        printf("filas SM de vidas (op 9/10, el rest revierte el EXT de la misma pasada): %s\n",
+               okF ? "PASA" : "FALLA");
+        serAl(p);
+        gRoot = rv;
+    }
+    {   // deshacer global de vidas: bitacora con tope, muertos fuera
+        Ser* rv = gRoot; gRoot = 0;
+        long e0 = gCa[CA_VIDA];
+        Ser* a = serCr(0, 'p', "vf", "VivA");
+        Ser* b = serCr(0, 'p', "vf", "VivB");
+        ccS(a, CI_VAL, 11); vidaToma(a);
+        ccS(a, CI_VAL, 22);
+        ccS(b, CI_VAL, 33); vidaToma(b);
+        ccS(b, CI_VAL, 44);
+        long d1 = vidaDeshacer();             // b vuelve: 44 -> 33
+        long d2 = vidaDeshacer();             // a vuelve: 22 -> 11
+        int okD = (d1 && d2 && ccG(b, CI_VAL) == 33 && ccG(a, CI_VAL) == 11
+                   && gCa[CA_VIDA] == e0 + 2);   // deshacer no snapshottea
+        for (long i = 0; i < 40; i++) { ccS(b, CI_VAL, 100 + i); vidaToma(b); }
+        okD = okD && vidaN(b) == 10 && gVidN == 1;   // dedupe: un solo nodo
+        long d3 = vidaDeshacer();             // b otra vez: vuelve a 139
+        okD = okD && d3 && ccG(b, CI_VAL) == 139;
+        serAl(a); serAl(b);
+        okD = okD && gVidN == 0;              // los muertos salen de la bitacora
+        printf("deshacer global de vidas (bitacora tope %ld): %s\n",
+               (long)VID_N, okD ? "PASA" : "FALLA");
+        gRoot = rv;
+    }
     FILE* o = fopenD("ser_check.ppm", "wb");
     if (o) {
         fprintf(o, "P6\n%ld %ld\n255\n", gW, gH);
@@ -4001,8 +4194,10 @@ static void pruebas() {
     for (long i = 0; i < gCemN; i++) serAl(gCem[i]);   // cementerio fuera
     gCemN = 0;
     printf("seres: %ld vivos (%ld antes)\n", gVivos, vivos0);
-    printf("contadores: ser %ld filas %ld ordenes %ld reservas %ld exportes %ld\n",
-           gCa[CA_SER], gCa[CA_FIL], gCa[CA_ORD], gCa[CA_RES], gCa[CA_EXP]);
+    printf("contadores: ser %ld filas %ld ordenes %ld reservas %ld exportes %ld"
+           " vidas %ld\n",
+           gCa[CA_SER], gCa[CA_FIL], gCa[CA_ORD], gCa[CA_RES], gCa[CA_EXP],
+           gCa[CA_VIDA]);
     fuenteLibera(&gFuUI);                // tipografias de datos: fuera
     fuenteLibera(&gFu3D);
     xMe((void*)gImg); gImg = 0;      // sin fuga al salir

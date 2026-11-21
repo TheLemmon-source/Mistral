@@ -351,6 +351,31 @@ entre hilos sin mutex:
   telemetria de sistema: seres, muertes, matrices, filas ejecutadas,
   ordenes drenadas por el escritor, reservas tomadas y exportes.
 
+## Vidas: snapshots de estado y deshacer global (H)
+
+De los lotes externos "inspiradores" (snapshots + regla R2 de reforma
+segura), adoptado al estilo propio: cada nodo puede sostener
+**snapshots de su propio `C[]`** como matrices `vd`
+(`[nC, secuencia, C[0..nC))`), cola con **tope 10** por nodo (el mas
+viejo sale). Nada de copiar estructuras: una vida son numeros.
+
+- `vidaToma(s)` saca el snapshot, `vidaRest(s, k, pop)` vuelve (k 0 =
+  el mas nuevo; con `pop` lo consume), `vidaN(s)` cuenta, y
+  `vidaDeshacer()` deshace el **ultimo efecto global**: una bitacora
+  de 24 nodos (dedupe, el mas reciente en la punta, los muertos salen
+  al morir) recordando quien snapshotteo ultimo.
+- Como **filas SM**: op `9` snapshot (`dst` = cantidad) y op `10`
+  volver al snapshot `arg` (`dst` = 1 si hubo). Ojo: el rest revierte
+  todo el `C[]`, incluso lo escrito por filas anteriores de la misma
+  pasada — asi la "reforma" esta cubierta: snapshot antes del cambio,
+  rest si salio mal.
+- Tecla **H**: `vidaDeshacer()`, el hermano de `U` (deshacer de
+  asignaciones) para efectos de vida.
+- El doc de escena lista por nodo `vidas: N snapshots (tope 10)` y el
+  contador `vidas` suma a la telemetria **ca** al pie.
+- Los nodos reciclados del pool conservan su historial? No: `serAl`
+  libera las matrices `vd` con el resto; cada vida muere con su nodo.
+
 ## Compilar
 
 Con GCC (MinGW64 en Windows):
@@ -363,7 +388,7 @@ En Dev-C++ (Proyecto Win32 GUI, C++11) o Makefile.win → target `Ser.o` +
 enlazado con `-luser32 -lgdi32`. Con ventana abre un editor de controles:
 botones, checks, sliders, redondeados, caches, sesiones anidadas.
 
-Sin modificar nada, `main()` corre primero la batería de pruebas (103/103 PASA,
+Sin modificar nada, `main()` corre primero la batería de pruebas (107/107 PASA,
 sin ventana) y escribe `ser_check.ppm` 800x520 como render de verificación.
 
 ## Formato
