@@ -446,6 +446,30 @@ filas SM es el salto:
   lista `fsm: estado E de N estados` por maquina.
 - La configuracion sobrevive el guardado: las filas (con su op 11) van
   por las lineas `V` y el estado por la linea `P`.
+- Cada maquina se pinta con su **diagrama de estados**: una franja de
+  chips (uno por estado, el vivo en ambar) y rieles cyan con los
+  saltos `op 11`. El ancho se reparte generico: cualquier cantidad de
+  estados y ramificaciones, sin casos especiales.
+
+## Contexto grafico: ppp, cm y rescalado del layout
+
+Nada de tamanos fijados a mano: el arranque de la ventana mide el
+**ppp real** con `GetDeviceCaps(LOGPIXELSX)` (y lo re-mide en
+`WM_SIZE`, por si cambia de monitor); de ahi salen:
+
+- `gPXcm` = ppp / 2.54 y el helper **`cmQz()`**: texturas y textos de
+  graficas se piden en centimetros (`cmQz(1.0)` = 1 cm de alto) y se
+  resuelven al contexto vivo.
+- **`gFS`** (escala de tipografia) es derivada: `fsDePpp(ppp)`; 96 ->
+  2, 144 -> 3, 192 -> 4. Otra compu con otra pantalla: el texto misma
+  altura fisica, sin tocar codigo.
+- El layout guardado lleva su **linea de contexto**
+  `G <w> <h> <ppp>` al inicio de `oroga.dbg`. Al recargar en otro
+  contexto, los nodos (menos la raiz, que siempre es la ventana viva)
+  se **re-escalan automaticamente** por la razon de tamano (tope x4,
+  identidad si cambio < 2%): la misma escena en otra compu o
+  resolucion reaparece en su lugar. Archivos viejos, sin linea `G`,
+  cargan exactos como siempre.
 
 ## Compilar
 
@@ -459,7 +483,7 @@ En Dev-C++ (Proyecto Win32 GUI, C++11) o Makefile.win → target `Ser.o` +
 enlazado con `-luser32 -lgdi32`. Con ventana abre un editor de controles:
 botones, checks, sliders, redondeados, caches, sesiones anidadas.
 
-Sin modificar nada, `main()` corre primero la batería de pruebas (113/113 PASA,
+Sin modificar nada, `main()` corre primero la batería de pruebas (116/116 PASA,
 sin ventana) y escribe `ser_check.ppm` 800x520 como render de verificación.
 
 ## Formato

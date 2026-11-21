@@ -40,7 +40,8 @@
 //             escritor + pintado (ventana). Embudo interlocked gCamNva y
 //             seqlock gCamF en k==6: el impar nunca lee frame a medio armar.
 //  guardia  : asignaciones de x/y se recortan al fol y esquivan hermanos.
-//  oroga.dbg: N = nodo, V = fila SM; carga si existe y guarda el arbol vivo.
+//  oroga.dbg: G = contexto grafico, N = nodo, V = fila SM, W = n9,
+//             P = polar/estado; carga si existe y guarda el arbol vivo.
 // ============================================================================
 
 #include <stdio.h>
@@ -907,6 +908,17 @@ static void textoFu(struct Fuente* F, float x, float y, const char* t,
 
 // ---- [R] raster: cache por zonas segun version ------------------------------
 static long gW = 800, gH = 520;
+static volatile long gPPP = 96;        // pixels por pulgada: la ventana lo mide
+static volatile long gPXcm = 38;       // pixels por cm: ppp / 2.54
+static long fsDePpp(long ppp) {        // escala de texto derivada del contexto
+    long f = (ppp + 24) / 48;
+    if (f < 1) f = 1;
+    if (f > 8) f = 8;
+    return f;                          // 96 -> 2, 144 -> 3, 192 -> 4
+}
+static long cmQz(double cm) {          // centimetros -> punto fijo, sin valores fijos
+    return (long)(cm * (double)gPXcm * (double)QZ);
+}
 static unsigned int* gImg = 0;         // ARGB empaquetado
 static long gImgGen = -1;
 
@@ -1546,11 +1558,38 @@ static void pintaNodo(Ser* s, float ox, float oy) {
             rectoQ(x, y, w, h, pr(0.08f, 0.1f, 0.14f, a), red);
             texto(x + 4, y + (h - 5 * gFS) * 0.5f, "CAM", pr(0.7f, 0.8f, 0.9f, 1));
         }
-    } else if (s->tc == 'f') {           // maquina: panel con el estado vivo al pie
+    } else if (s->tc == 'f') {           // maquina: panel + diagrama de estados
         rectoQ(x, y, w, h, col, red);
         rectoQ(x + 1, y + 1, w - 2 < 0 ? 0 : w - 2, 14 < h - 2 ? 14 : h - 2,
                pr(r * 1.35f, g * 1.35f, b * 1.35f, a > 0.5f ? 1 : a), red);
         texto(x + 4, y + 3, s->lb, pr(1, 1, 1, 1));
+        if (s->nA > 0) {
+            float cwt = (w - 8) / (float)s->nA;      // ancho por estado: generico
+            if (cwt < 4) cwt = 4;
+            float chp = 3 * gFS + 4;                 // alto del chip: de la fuente
+            float fyA = y + 5 * gFS + 2;             // franja del diagrama
+            float rail = fyA + chp + 2;              // riel de saltos
+            for (long i = 0; i < s->nA; i++) {
+                float cx = x + 4 + i * cwt;
+                unsigned int cc = (i == ccG(s, CI_EST))
+                    ? pr(1, 0.75f, 0.15f, 1)         // estado vivo: ambar
+                    : pr(0.25f, 0.3f, 0.4f, 1);
+                rectoQ(cx, fyA, cwt - 2 < 2 ? 2 : cwt - 2, chp, cc, 2);
+                Ser* es2 = s->A[i];
+                if (!es2) continue;
+                for (long rj = 0; rj < es2->nM; rj++) {   // saltos op 11: rieles
+                    if (!es2->M[rj] || !es2->TM[rj] || es2->TM[rj][0] != 'f') continue;
+                    double* r6 = (double*)es2->M[rj];
+                    if ((long)r6[3] != 11) continue;
+                    long nx = (long)r6[4];
+                    if (nx < 0 || nx >= s->nA || nx == i) continue;
+                    float x0d = cx + (cwt - 2) * 0.5f;
+                    float x1d = x + 4 + nx * cwt + (cwt - 2) * 0.5f;
+                    if (x1d < x0d) { float tt = x0d; x0d = x1d; x1d = tt; }
+                    rectoQ(x0d, rail, x1d - x0d, 1.5f, pr(0.5f, 0.8f, 1, 1), 0);
+                }
+            }
+        }
         char fb[32];
         snprintf(fb, sizeof(fb), "est %ld de %ld", ccG(s, CI_EST), s->nA);
         float fy = y + h - 6 * gFS;
@@ -2302,6 +2341,7 @@ static void escritor() {
         } else if (o->k == 4) {                  // guardar oroga.dbg
             FILE* f = fopenD(gRuta, "wb");
             if (f) {
+                fprintf(f, "G %ld %ld %ld\n", gW, gH, gPPP);  // contexto de origen
                 long idx = 0; long cort = 0;
                 Ser* lin[1024]; long folto[1024];
                 lin[idx] = gRoot; folto[idx] = -1; idx++;
@@ -2835,8 +2875,21 @@ static __attribute__((unused)) long desEscena(const char* ruta) {
     Ser** prev = (Ser**)xM(1024 * sizeof(Ser*));
     for (long i = 0; i < 1024; i++) prev[i] = 0;
     long np = 0;
+    double efx = 1, efy = 1;               // rescalado: contexto de origen vs actual
     while (fgets(lin, sizeof(lin), f)) {
-        if (lin[0] == 'N') {
+        if (lin[0] == 'G') {                     // contexto grafico en que se guardo
+            float gw = 0, gh = 0;
+            leeNum(lin, 1, &gw); leeNum(lin, 2, &gh);
+            if (gw > 16 && gh > 16 && gW > 16 && gH > 16) {
+                efx = (double)gW / gw; efy = (double)gH / gh;
+                if (efx < 0.25) efx = 0.25;
+                if (efx > 4) efx = 4;
+                if (efy < 0.25) efy = 0.25;
+                if (efy > 4) efy = 4;
+                if (efx > 0.98 && efx < 1.02) efx = 1;
+                if (efy > 0.98 && efy < 1.02) efy = 1;
+            }
+        } else if (lin[0] == 'N') {
             float fol = 0, x = 0, y = 0, w = 0, h = 0;
             float r = 0, g = 0, b = 0, a = 0, ab = 0, fl = 0, vv = 0;
             char nomb[256], tct[16];
@@ -2874,8 +2927,17 @@ static __attribute__((unused)) long desEscena(const char* ruta) {
                 Ser* folp = (fol < np) ? prev[(long)fol] : 0;
                 s = serCr(folp ? folp : gRoot, tcc, "nd", nomb);
             }
-            ccS(s, CI_X, (long)x); ccS(s, CI_Y, (long)y);
-            ccS(s, CI_W, (long)w); ccS(s, CI_H, (long)h);   // el archivo ya es punto fijo: sin *QZ
+            if (s != gRoot || (fol >= 0)) {      // rescalado salvo la raiz viva
+                ccS(s, CI_X, (long)((double)x * efx)); ccS(s, CI_Y, (long)((double)y * efy));
+                ccS(s, CI_W, (long)((double)w * efx)); ccS(s, CI_H, (long)((double)h * efy));
+            } else {                             // raiz: el archivo ya es punto fijo
+                ccS(s, CI_X, (long)x); ccS(s, CI_Y, (long)y);
+            }
+            if (s != gRoot) {
+                ccS(s, CI_W, (long)((double)w * efx)); ccS(s, CI_H, (long)((double)h * efy));
+            } else {                             // raiz: tamano de la ventana viva
+                ccS(s, CI_W, gW * QZ); ccS(s, CI_H, gH * QZ);
+            }
             ccS(s, CI_R, (long)r); ccS(s, CI_G, (long)g);
             ccS(s, CI_B, (long)b); ccS(s, CI_A, (long)a);
             ccS(s, CI_ABI, (long)ab); ccS(s, CI_FLG, (long)fl);
@@ -3828,6 +3890,81 @@ static void pruebas() {
         }
         serAl(m);                                // sin maquina corriendo en la escena
     }
+    {   // ppp base: contexto grafico medido, no numeros fijos
+        long q1 = cmQz(1.0) / QZ;
+        long fs1 = fsDePpp(96), fs3 = fsDePpp(144), fs4 = fsDePpp(192);
+        printf("ppp base: %s (ppp %ld, px/cm %ld, 1cm = %ld px, fs 96/144/192 = "
+               "%ld/%ld/%ld)\n",
+               gPPP == 96 && gPXcm == 38 && q1 == 38
+               && fs1 == 2 && fs3 == 3 && fs4 == 4 ? "PASA" : "FALLA",
+               gPPP, gPXcm, q1, fs1, fs3, fs4);
+    }
+    {   // diagrama de estados: franja de chips, el vivo en ambar
+        Ser* rv = gRoot; gRoot = 0; desEscenaRoot();   // raiz limpia: solo el diagrama
+        Ser* dm = serCr(gRoot, 'f', "dg", "Diagrama");
+        ccS(dm, CI_W, 180 * QZ); ccS(dm, CI_H, 40 * QZ);
+        ccS(dm, CI_X, 300 * QZ); ccS(dm, CI_Y, 200 * QZ);
+        ccS(dm, CI_FLG, 1); ccS(dm, CI_R, QZ);
+        for (long i = 0; i < 3; i++) {
+            Ser* ei = serCr(dm, 'p', "ei", "st");
+            f6Add(ei, 0, CI_VAL, 0, 11, (double)((i + 1) % 3), 0);  // i -> i+1 mod 3
+        }
+        gImgGen = -1; pintaTodo();
+        long ambI = 0, ambD = 0;
+        for (long yy = 205; yy < 245; yy++)          // el nodo vive en y 200..240
+            for (long xx = 0; xx < gW; xx++)
+                if (gImg[(unsigned long)yy * gW + xx] == pr(1, 0.75f, 0.15f, 1)) {
+                    if (xx < 390) ambI++; else ambD++;
+                }
+        ccS(dm, CI_EST, 2);                      // el vivo pasa al chip de la derecha
+        gImgGen = -1; pintaTodo();
+        long ambI2 = 0, ambD2 = 0;
+        for (long yy = 205; yy < 245; yy++)
+            for (long xx = 0; xx < gW; xx++)
+                if (gImg[(unsigned long)yy * gW + xx] == pr(1, 0.75f, 0.15f, 1)) {
+                    if (xx < 390) ambI2++; else ambD2++;
+                }
+        printf("diagrama de estados: %s (ambar izq/der %ld/%ld -> %ld/%ld)\n",
+               ambI > 0 && ambD == 0 && ambI2 == 0 && ambD2 > 0 ? "PASA" : "FALLA",
+               ambI, ambD, ambI2, ambD2);
+        for (long i = 0; i < gRoot->nA; i++) if (gRoot->A[i] == dm) {
+            for (long j = i; j < gRoot->nA - 1; j++) gRoot->A[j] = gRoot->A[j + 1];
+            gRoot->nA--;
+            break;
+        }
+        serAl(dm);
+        serAl(gRoot);                            // la raiz limpia muere entera
+        gRoot = rv; gImgGen = -1;
+    }
+    {   // rescalado automatico: cambio de contexto grafico, el layout sigue
+        FILE* v = fopenD(gRuta, "wb");
+        if (v) {
+            fprintf(v, "G 400 260 96\n");
+            fprintf(v, "N 0 -1 r Ro 0 0 102400 66560 0 0 0 256 0 9 \n");
+            fprintf(v, "N 1 0 p Tst 4096 4096 25600 5120 0 0 0 256 1 9 0\n");
+            fclose(v);
+        }
+        while (gRoot->nA > 0) {
+            Ser* h = gRoot->A[gRoot->nA - 1];
+            gRoot->nA--;
+            serAl(h);
+        }
+        serAl(gRoot); gRoot = 0;
+        gSes = 0; gForm = 0; gCamNodo = 0; gColNodo = 0; gColPnl = 0; gSel = 0; gAnt = 0; gArra = 0;
+        gInsp = 0; gInspEd = 0; gInspVis = 0; gInspPn = 0;
+        gInspR = 0; gInspG = 0; gInspB = 0; gInspRad = 0;
+        gAyTxt = 0; gObj = 0; gMenu = 0; gInsp2 = 0; gFilTxt = 0; gFilI = 0; gFilLast = 0;
+        long rr = desEscena(gRuta);
+        Ser* tst = (gRoot && gRoot->nA > 0) ? gRoot->A[0] : 0;
+        printf("rescalado del layout: %s (nodos %ld, hijo w %ld h %ld x %ld, "
+               "raiz w %ld)\n",
+               rr == 2 && tst && ccG(tst, CI_W) == 100 * QZ * 2
+               && ccG(tst, CI_H) == 20 * QZ * 2 && ccG(tst, CI_X) == 16 * QZ * 2
+               && gRoot && ccG(gRoot, CI_W) == gW * QZ ? "PASA" : "FALLA",
+               rr, tst ? ccG(tst, CI_W) : -1, tst ? ccG(tst, CI_H) : -1,
+               tst ? ccG(tst, CI_X) : -1,
+               gRoot ? ccG(gRoot, CI_W) / QZ : -1);
+    }
     ordP(4, 0, 0, 0, 0, 0, 0, 0); escritor();       // etiqueta con espacios:
     Ser* sp = serCr(gRoot, 'l', "sP", "SEL pin [k] PIN");   // antes corrompia
     ccS(sp, CI_W, 660 * QZ); ccS(sp, CI_H, 32 * QZ);
@@ -3874,7 +4011,7 @@ static void pruebas() {
         gAyTxt = 0; gObj = 0;
         desEscena(gRuta);
         printf("migracion de formato viejo: %s (x=%ld w=%ld val=%ld lb=%s)\n",
-               (gRoot && ccG(gRoot, CI_X) == 4096 && ccG(gRoot, CI_W) == 66560
+               (gRoot && ccG(gRoot, CI_X) == 4096 && ccG(gRoot, CI_W) == gW * QZ
                 && ccG(gRoot, CI_VAL) == 555
                 && gRoot->lb && strcmp(gRoot->lb, "Dmo") == 0) ? "PASA" : "FALLA",
                gRoot ? ccG(gRoot, CI_X) : -1, gRoot ? ccG(gRoot, CI_W) : -1,
@@ -4629,6 +4766,14 @@ static LRESULT CALLBACK wnProc(HWND v, UINT m, WPARAM w, LPARAM l) {
             unsigned int bgf = pr(0.07f, 0.08f, 0.1f, 1);
             for (unsigned long i = 0; i < (unsigned long)(gW * gH); i++) gImg[i] = bgf;
             gImgGen = -1;                // todo el frame se repinta
+            if (gHdc) {                  // el ppp puede cambiar de monitor
+                long pppB = (long)GetDeviceCaps(gHdc, LOGPIXELSX);
+                if (pppB >= 48 && pppB != gPPP) {
+                    gPPP = pppB;
+                    gPXcm = (long)((double)pppB / 2.54 + 0.5);
+                    gFS = fsDePpp(pppB);
+                }
+            }
             if (gRoot) {
                 ccS(gRoot, CI_W, gW * QZ);
                 ccS(gRoot, CI_H, gH * QZ);
@@ -4677,6 +4822,11 @@ int PASCAL WinMain(HINSTANCE i, HINSTANCE p, LPSTR c, int s) {
     gVen = CreateWindowExA(0, "ser", "ser", (DWORD)estilo,
                            60, 60, rc.right - rc.left, rc.bottom - rc.top, 0, 0, i, 0);
     gHdc = GetDC(gVen);
+    long pppA = (long)GetDeviceCaps(gHdc, LOGPIXELSX);   // ppp real de la pantalla
+    if (pppA < 48) pppA = 96;
+    gPPP = pppA;
+    gPXcm = (long)((double)pppA / 2.54 + 0.5);
+    gFS = fsDePpp(pppA);                 // la fuente se mide, no se fija
     gImg = (unsigned int*)xM((unsigned long)(gW * gH) * sizeof(unsigned int));
     unsigned int bgf = pr(0.07f, 0.08f, 0.1f, 1);
     for (unsigned long i = 0; i < (unsigned long)(gW * gH); i++) gImg[i] = bgf;
