@@ -413,6 +413,40 @@ angulo `CI_AGL` y barre `CI_ARC` grados.
   conviven.
 - `CI_ARC = 0` = caja de siempre; nada de lo existente cambia.
 
+## Sesion: polar y estado de maquina persistidos
+
+Linea extendida **`P <idx> <agl> <rad> <arc> <est>`** al pie de cada
+nodo en `oroga.dbg` (mismo estilo que `V` y `W`): guarda los canales
+`CI_AGL`/`CI_RAD`/`CI_ARC` y el estado `CI_EST` de las maquinas.
+Solo se escribe si alguno es distinto de 0, asi que:
+
+- Formato viejo intacto: el lector nuevo ignora lo que no conoce y el
+  lector viejo jamas ve la linea `P` (los archivos viejos cargan igual).
+- Ceros no persisten: canal ausente = 0, la sesion no engorda.
+- Al recargar, espiral, semiarco y la fase de la maquina reaparecen
+  exactos donde quedaron.
+
+## Maquinas de estados (fsm)
+
+La FSM del lote inspirador, traducida a "todo es condicion +
+asignacion": una maquina es un nodo **`tc 'f'`**, sus estados son sus
+hijos, el canal **`CI_EST`** (99) es el estado vivo, y **op 11** en
+filas SM es el salto:
+
+- Fila `op 11`: si la condicion de la fila es cierta la maquina salta
+  al estado `dst`; si es falsa, al estado `arg`. `-1` o el mismo
+  estado = se queda. La condicion es la de siempre (0 siempre,
+  1 `<`, 2 `>`, 3 `==`) sobre cualquier canal.
+- Las filas del estado vivo corren cada paso (`fsmPaso`): las
+  asignaciones/op 6-10 de ese hijo SON la accion del estado, sin
+  interprete nuevo. `fsmPaso` corre en `tickN9`, o sea las maquinas
+  avanzan por cuadro junto a los contadores `n9`.
+- Salto invalido (indice fuera de rango) = se queda: sin crash.
+- Pintado propio: panel con `est N de M` al pie, y el doc de escena
+  lista `fsm: estado E de N estados` por maquina.
+- La configuracion sobrevive el guardado: las filas (con su op 11) van
+  por las lineas `V` y el estado por la linea `P`.
+
 ## Compilar
 
 Con GCC (MinGW64 en Windows):
@@ -425,7 +459,7 @@ En Dev-C++ (Proyecto Win32 GUI, C++11) o Makefile.win → target `Ser.o` +
 enlazado con `-luser32 -lgdi32`. Con ventana abre un editor de controles:
 botones, checks, sliders, redondeados, caches, sesiones anidadas.
 
-Sin modificar nada, `main()` corre primero la batería de pruebas (111/111 PASA,
+Sin modificar nada, `main()` corre primero la batería de pruebas (113/113 PASA,
 sin ventana) y escribe `ser_check.ppm` 800x520 como render de verificación.
 
 ## Formato

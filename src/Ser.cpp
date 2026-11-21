@@ -142,6 +142,7 @@ static long removeD(const char* nom) {
 #define CI_AGL 96                      // [P] polar: angulo en grados * QZ
 #define CI_RAD 97                      // [P] polar: radio en QZ (pulsos de 256)
 #define CI_ARC 98                      // [P] semiarco: barrido en grados * QZ
+#define CI_EST 99                      // [F] fsm: estado actual (indice del hijo)
 
 // ---- [S] nucleo ser ---------------------------------------------------------
 static void* xM(unsigned long nb) {
@@ -615,6 +616,19 @@ static void exRows(Ser* s) {              // ejecucion de filas SM del nodo
         long cond = (long)f[0], ci = (long)f[1], cmp = (long)f[2];
         long op = (long)f[3], dst = (long)f[4], arg = (long)f[5];
         long v = ccG(s, ci);
+        if (op == 11) {                  // fsm: la maquina (fol) salta a dst (verd)
+                                         // o a arg (falso); -1 o igual = se queda
+            Ser* m = s->fol;
+            long rv = 1;
+            if (cond == 1) rv = (v < cmp);
+            else if (cond == 2) rv = (v > cmp);
+            else if (cond == 3) rv = (v == cmp);
+            long nx = rv ? dst : arg;
+            if (m && nx >= 0 && nx != ccG(m, CI_EST)) {
+                ccS(m, CI_EST, nx); caSuma(CA_FIL); s->vr++; m->vr++; gGen++;
+            }
+            continue;
+        }
         if (cond == 1) { if (!(v < cmp)) continue; }
         else if (cond == 2) { if (!(v > cmp)) continue; }
         else if (cond == 3) { if (v != cmp) continue; }
@@ -677,8 +691,20 @@ static void exRows(Ser* s) {              // ejecucion de filas SM del nodo
         if (dst < 0 && s->fol) s->fol->vr++;        // el fol tambien cambia
     }
 }
+static long fsmPaso(Ser* m) {             // un paso de la maquina 'f': filas del estado vivo
+    if (!m || m->nA == 0) return -1;
+    long e = ccG(m, CI_EST);
+    if (e < 0 || e >= m->nA) { ccS(m, CI_EST, 0); e = 0; }
+    Ser* es = m->A[e];
+    if (!es) return e;
+    exRows(es);                           // las filas del estado corren (op 11 salta)
+    long ne = ccG(m, CI_EST);
+    if (ne < 0 || ne >= m->nA) { ne = e; ccS(m, CI_EST, ne); }   // salto invalido: se queda
+    return ne;
+}
 static void tickN9(Ser* s) {              // contadores vivos: recorre el arbol
     if (!s) return;
+    if (s->tc == 'f') fsmPaso(s);         // las maquinas avanzan por cuadro
     exN9(s);
     for (long i = 0; i < s->nA; i++) tickN9(s->A[i]);
 }
@@ -1520,6 +1546,16 @@ static void pintaNodo(Ser* s, float ox, float oy) {
             rectoQ(x, y, w, h, pr(0.08f, 0.1f, 0.14f, a), red);
             texto(x + 4, y + (h - 5 * gFS) * 0.5f, "CAM", pr(0.7f, 0.8f, 0.9f, 1));
         }
+    } else if (s->tc == 'f') {           // maquina: panel con el estado vivo al pie
+        rectoQ(x, y, w, h, col, red);
+        rectoQ(x + 1, y + 1, w - 2 < 0 ? 0 : w - 2, 14 < h - 2 ? 14 : h - 2,
+               pr(r * 1.35f, g * 1.35f, b * 1.35f, a > 0.5f ? 1 : a), red);
+        texto(x + 4, y + 3, s->lb, pr(1, 1, 1, 1));
+        char fb[32];
+        snprintf(fb, sizeof(fb), "est %ld de %ld", ccG(s, CI_EST), s->nA);
+        float fy = y + h - 6 * gFS;
+        if (fy < y + 16) fy = y + 16;
+        texto(x + 4, fy, fb, pr(0.7f, 0.85f, 1, 1));
     } else {   // 'p' y 'r' y 'o': panel (recuadre redondeado de demo)
         rectoQ(x, y, w, h, col, red);
         rectoQ(x + 1, y + 1, w - 2 < 0 ? 0 : w - 2, 14 < h - 2 ? 14 : h - 2,
@@ -2182,6 +2218,10 @@ static void docRec(FILE* f, Ser* t, long prof) {     // el arbol como documento
         for (long i = 0; i <= prof; i++) fprintf(f, "  ");
         fprintf(f, "vidas: %ld snapshots (tope %ld)\n", vidaN(t), (long)VID_TOPE);
     }
+    if (t->tc == 'f' && t->nA > 0) {                 // maquina de estados viva
+        for (long i = 0; i <= prof; i++) fprintf(f, "  ");
+        fprintf(f, "fsm: estado %ld de %ld estados\n", ccG(t, CI_EST), t->nA);
+    }
     for (long i = 0; i < t->nA; i++) docRec(f, t->A[i], prof + 1);
 }
 static long docEscena(const char* nom) {
@@ -2286,6 +2326,11 @@ static void escritor() {
                         for (long c = 0; c < 9; c++) fprintf(f, " %g", r9[c]);
                         fprintf(f, "\n");
                     }
+                    if (ccG(s, CI_AGL) || ccG(s, CI_RAD) || ccG(s, CI_ARC)
+                        || ccG(s, CI_EST))
+                        fprintf(f, "P %ld %ld %ld %ld %ld\n", p,
+                            ccG(s, CI_AGL), ccG(s, CI_RAD), ccG(s, CI_ARC),
+                            ccG(s, CI_EST));     // polar + estado: linea extendida
                     for (long i = 0; i < s->nA; i++) {
                         if (!s->A[i]) continue;
                         if (idx < 1024) { lin[idx] = s->A[i]; folto[idx] = p; idx++; }
@@ -2852,6 +2897,17 @@ static __attribute__((unused)) long desEscena(const char* ruta) {
             if (idx >= 0 && idx < np)
                 n9Add(prev[(long)idx], n[0], n[1], n[2], n[3], n[4], n[5],
                       n[6], n[7], n[8]);
+        } else if (lin[0] == 'P') {              // polar + estado de maquina persistidos
+            float idx = 0, ag = 0, rd = 0, ac = 0, es = 0;
+            leeNum(lin, 1, &idx); leeNum(lin, 2, &ag); leeNum(lin, 3, &rd);
+            leeNum(lin, 4, &ac);  leeNum(lin, 5, &es);
+            if (idx >= 0 && idx < np) {
+                Ser* s = prev[(long)idx];
+                if (ag) ccS(s, CI_AGL, (long)ag);
+                if (rd) ccS(s, CI_RAD, (long)rd);
+                if (ac) ccS(s, CI_ARC, (long)ac);
+                if (es) ccS(s, CI_EST, (long)es);
+            }
         }
     }
     xMe(prev);
@@ -3707,6 +3763,70 @@ static void pruebas() {
         double* fila = (sld1 && sld1->nM > 0) ? (double*)sld1->M[0] : 0;
         printf("cond fraccionaria sobrevive: %s (%g)\n",
                fila && fila[0] == 0.5 ? "PASA" : "FALLA", fila ? fila[0] : -1.0);
+    }
+    {   // sesion: polar y estado de maquina sobreviven el guardado (linea P)
+        Ser* mq = serCr(gRoot, 'f', "mq", "FSM test");
+        ccS(mq, CI_W, 80 * QZ); ccS(mq, CI_H, 24 * QZ);
+        ccS(mq, CI_AGL, 45 * QZ); ccS(mq, CI_RAD, 30 * QZ); ccS(mq, CI_ARC, 90 * QZ);
+        Ser* e0 = serCr(mq, 'p', "e0", "cuenta");
+        Ser* e1 = serCr(mq, 'p', "e1", "listo");
+        f6Add(e0, 1, CI_VAL, 3, 11, 0, 1);       // VAL < 3: se queda; no: al 1
+        f6Add(e1, 0, CI_EXT, 0, 0, CI_EXT, 7);
+        f6Add(e1, 0, CI_VAL, 0, 11, 0, 0);       // siempre: vuelve al 0
+        ccS(mq, CI_EST, 1);                      // justo en el estado 1
+        ordP(4, 0, 0, 0, 0, 0, 0, 0); escritor();
+        long v0 = gVivos;
+        while (gRoot->nA > 0) {
+            Ser* h = gRoot->A[gRoot->nA - 1];
+            gRoot->nA--;
+            serAl(h);
+        }
+        serAl(gRoot); gRoot = 0;
+        gSes = 0; gForm = 0; gCamNodo = 0; gColNodo = 0; gColPnl = 0; gSel = 0; gAnt = 0; gArra = 0;
+        gInsp = 0; gInspEd = 0; gInspVis = 0; gInspPn = 0;
+        gInspR = 0; gInspG = 0; gInspB = 0; gInspRad = 0;
+        gAyTxt = 0; gObj = 0; gMenu = 0; gInsp2 = 0; gFilTxt = 0; gFilI = 0; gFilLast = 0;
+        long rr = desEscena(gRuta);
+        Ser* mq2 = 0;
+        for (long i = 0; gRoot && !mq2 && i < gRoot->nA; i++)
+            if (gRoot->A[i]->tc == 'f') mq2 = gRoot->A[i];
+        Ser* e1b = (mq2 && mq2->nA > 1) ? mq2->A[1] : 0;
+        printf("polar+fsm persisten: %s (est %ld, agl %ld, rad %ld, arc %ld, filas %ld)\n",
+               rr == v0 && mq2 && mq2->nA == 2 && e1b && e1b->nM == 2
+               && ccG(mq2, CI_EST) == 1 && ccG(mq2, CI_AGL) == 45 * QZ
+               && ccG(mq2, CI_RAD) == 30 * QZ && ccG(mq2, CI_ARC) == 90 * QZ
+               && ccG(e1b, CI_EXT) == 0 ? "PASA" : "FALLA",
+               mq2 ? ccG(mq2, CI_EST) : -2, mq2 ? ccG(mq2, CI_AGL) : -2,
+               mq2 ? ccG(mq2, CI_RAD) : -2, mq2 ? ccG(mq2, CI_ARC) : -2,
+               e1b ? e1b->nM : -1);
+    }
+    {   // fsm: op 11 salta entre estados y el estado vivo ejecuta sus filas
+        Ser* m = serCr(gRoot, 'f', "fs", "FSM viva");
+        ccS(m, CI_W, 80 * QZ); ccS(m, CI_H, 24 * QZ);
+        Ser* a0 = serCr(m, 'p', "s0", "cuenta");
+        Ser* a1 = serCr(m, 'p', "s1", "listo");
+        f6Add(a0, 0, CI_VAL, 0, 1, CI_VAL, 1);   // por paso: VAL += 1
+        f6Add(a0, 1, CI_VAL, 3, 11, 0, 1);       // VAL < 3: quedarse; no: saltar a 1
+        f6Add(a1, 0, CI_VAL, 0, 0, CI_EXT, 7);   // EXT = 7 mientras vive el estado 1
+        f6Add(a1, 0, CI_VAL, 0, 11, 0, 0);       // siempre: volver a 0
+        long p1 = fsmPaso(m);
+        long p2 = fsmPaso(m);
+        long p3 = fsmPaso(m);
+        long c3 = ccG(a0, CI_VAL);
+        long p4 = fsmPaso(m);
+        long x4 = ccG(a1, CI_EXT);
+        long p5 = fsmPaso(m);
+        printf("fsm salta entre estados: %s (p1 %ld p2 %ld, paso3 est %ld val %ld, "
+               "paso4 est %ld ext %ld, paso5 est %ld)\n",
+               p1 == 0 && p2 == 0 && p3 == 1 && c3 == 3 && p4 == 0 && x4 == 7
+               && p5 == 1 ? "PASA" : "FALLA",
+               p1, p2, p3, c3, p4, x4, p5);
+        for (long i = 0; i < gRoot->nA; i++) if (gRoot->A[i] == m) {
+            for (long j = i; j < gRoot->nA - 1; j++) gRoot->A[j] = gRoot->A[j + 1];
+            gRoot->nA--;
+            break;
+        }
+        serAl(m);                                // sin maquina corriendo en la escena
     }
     ordP(4, 0, 0, 0, 0, 0, 0, 0); escritor();       // etiqueta con espacios:
     Ser* sp = serCr(gRoot, 'l', "sP", "SEL pin [k] PIN");   // antes corrompia
