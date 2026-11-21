@@ -21,10 +21,12 @@
 //             sin fuente pinta CAM. Bezel Cam fijado contiene la camara.
 //  cubo 3D  : la fuente del par ya proyecta un cubo girando (perspectiva +
 //             pintor + luz): el 3D es la misma fila 'x' que produce pixels.
-//  colador  : tercer paso (pase del impar cada 8 tics): bbox del mundo fit a
-//             gBufCol 64x48; pesos volatiles gColAnti/gColImp/gColUrg (frescura
-//             via s->ulti = tic del ultimo toque en ccS); alimenta la camara
-//             Colado (gColNodo) por el mismo embudo gColNva.
+//  colador  : tercer paso (pase del impar cada 8 tics): escena con pintor real
+//             (widgets, titulos, cache por version) fit al tamano pedido;
+//             pesos volatiles gColAnti/gColImp/gColUrg (frescura via s->ulti =
+//             tic del ultimo toque en ccS); base 64x48 en gBufCol y, nida
+//             con camara, la camara Colado (gColNodo) pide su resolucion
+//             propria; embudo gColNva en ambos.
 //  escritor : unico (par obrero en Win; sicrono en pruebas). La GUI encola.
 //  raster   : cache por version (solo repinta si cambia el gen), colado en
 //             orden de A[] (el mismo orden sirve para pick, multiply z).
@@ -360,6 +362,9 @@ static void deshacer() {                 // repone el ultimo grupo completo
 // ---- [V] SM: filas de condicion y asignacion --------------------------------
 static void ordCr(char tc, Ser* fol);      // encola creacion de rama ([Q])
 static void ordFeed(Ser* t, unsigned int* im, long w, long h);  // [W] camara
+static long long* cachePinta(Ser* c, long pintar);   // cache fresco ([N])
+static void blitEsc(long long* c4, float dx, float dy,
+                    float dw, float dh);        // cache a escala ([N])
 static double* f6Add(Ser* s, double cond, double ci, double cmp,
                      double op, double dst, double arg) {
     long k = -1;
@@ -1113,14 +1118,23 @@ static void camFuente() {               // el par proyecta el cubo 3D
 }
 
 // ---- [C] colador: tercer proceso, escena -> imagen con pesos volatiles -------
+// Pintor real: cada sere se toma de su cache (cachePinta) y se vuelca a
+// escala, asi el colado es la escena misma (widgets, titulos, textos), no
+// rects crudos. Resolucion pedida: base 64x48 para la base y, anidada con
+// camara, la camara Colado pide la suya (gColImg en WinMain).
 static volatile long gColAnti = 400, gColImp = 300, gColUrg = 300;   // pesos 0..1000
 static Ser* gColNodo = 0;               // camara 'm' que muestra lo colado
 static Ser* gColPnl = 0;                // panel con los sliders de los pesos
 static volatile long gColNva = 0;       // embudo: colado nuevo
-static unsigned int gBufCol[64 * 48];   // imagen colada (fit del bbox del mundo)
-static void colador() {
-    if (!gRoot) return;
-    for (long i = 0; i < 64 * 48; i++) gBufCol[i] = 0;
+static unsigned int gBufCol[64 * 48];   // imagen colada base 64x48
+#if defined(_WIN32)
+static unsigned int* gColImg = 0;       // colado a resolucion de la camara
+static long gColWc = 0, gColHc = 0;
+#endif
+
+static void coladorPinta(unsigned int* dst, long dw, long dh) {
+    if (!gRoot || !dst || dw < 12 || dh < 12) return;
+    for (long i = 0; i < dw * dh; i++) dst[i] = 0;
     long bx0 = 1 << 30, by0 = 1 << 30, bx1 = -(1 << 30), by1 = -(1 << 30);
     for (long i = 0; i < gRoot->nA; i++) {
         Ser* s = gRoot->A[i];
@@ -1135,18 +1149,25 @@ static void colador() {
         if (x + w > bx1) bx1 = x + w;
         if (y + h > by1) by1 = y + h;
     }
+    __sync_lock_test_and_set(&gColNva, 1);
     if (bx1 <= bx0 || by1 <= by0) return;
-    float fs = 60.0f / (float)(bx1 - bx0);
-    float fy = 44.0f / (float)(by1 - by0);
+    float fs = (float)(dw - 4) / (float)(bx1 - bx0);
+    float fy = (float)(dh - 4) / (float)(by1 - by0);
     if (fy < fs) fs = fy;
+    unsigned int* tg0 = gTgt;            // el pintor rasteriza en gTgt
+    long tw0 = gTW, th0 = gTH;
+    struct Fuente* fu0 = gFuAct;
+    gTgt = dst; gTW = dw; gTH = dh;
+    gFuAct = &gFuUI;                     // el texto sale con su contexto
     for (long i = 0; i < gRoot->nA; i++) {
         Ser* s = gRoot->A[i];
         if (!s || s->tc == 0) continue;
         long fl = ccG(s, CI_FLG);
-        if (s->tc != 'r' && !(fl & 1)) continue;
+        long vis = fl & 1;
+        if (s->tc != 'r' && !vis) continue;
         long w = ccG(s, CI_W), h = ccG(s, CI_H);
         if (w <= 0 || h <= 0) continue;
-        long impL = (fl & 8) ? 900 : (ccG(s, CI_ABI) ? 500 : ((fl & 1) ? 300 : 0));
+        long impL = (fl & 8) ? 900 : (ccG(s, CI_ABI) ? 500 : (vis ? 300 : 0));
         long dc = gTic - s->ulti;
         float fres = 1000.0f - (dc > 16000 ? 1000.0f : (float)dc / 16.0f);
         if (fres < 0) fres = 0;
@@ -1154,18 +1175,33 @@ static void colador() {
         float sc = ((float)gColAnti * fres + (float)gColImp * (float)impL
                     + (float)gColUrg * urg) / 1000.0f;
         if (sc < 1.0f) continue;         // el colador lo deja pasar de largo
-        float ax = 2.0f + ((float)ccG(s, CI_X) - (float)bx0) * fs;
-        float ay = 2.0f + ((float)ccG(s, CI_Y) - (float)by0) * fs;
-        float aw = (float)w * fs, ah = (float)h * fs;
-        if (aw < 1.0f) aw = 1.0f;
-        if (ah < 1.0f) ah = 1.0f;
-        unsigned int col = pr((float)ccG(s, CI_R) / QZ, (float)ccG(s, CI_G) / QZ,
-                              (float)ccG(s, CI_B) / QZ, (float)ccG(s, CI_A) / QZ);
-        triLleno(gBufCol, 64, 48, ax, ay, ax + aw, ay, ax, ay + ah, col);
-        triLleno(gBufCol, 64, 48, ax + aw, ay, ax, ay + ah, ax + aw, ay + ah, col);
+        float ax = 2.0f + ((float)ccG(s, CI_X) - (float)bx0) * fs
+                   - 3.0f * (float)QZ * fs;    // cache: marco de 3 px en (0,0)
+        float ay = 2.0f + ((float)ccG(s, CI_Y) - (float)by0) * fs
+                   - 3.0f * (float)QZ * fs;
+        long long* c4 = vis ? cachePinta(s, 1) : 0;
+        if (c4 && (long)c4[1] > 0 && (long)c4[2] > 0) {
+            blitEsc(c4, ax, ay, (float)c4[1] * (float)QZ * fs,
+                    (float)c4[2] * (float)QZ * fs);
+        } else {                         // sin pintura (invisible): rect color
+            float aw = (float)w * fs, ah = (float)h * fs;
+            if (aw < 1.0f) aw = 1.0f;
+            if (ah < 1.0f) ah = 1.0f;
+            unsigned int col = pr((float)ccG(s, CI_R) / QZ,
+                                  (float)ccG(s, CI_G) / QZ,
+                                  (float)ccG(s, CI_B) / QZ,
+                                  (float)ccG(s, CI_A) / QZ);
+            triLleno(dst, dw, dh, ax, ay, ax + aw, ay, ax, ay + ah, col);
+            triLleno(dst, dw, dh, ax + aw, ay, ax, ay + ah, ax + aw, ay + ah, col);
+        }
     }
-    __sync_lock_test_and_set(&gColNva, 1);
+    gTgt = tg0; gTW = tw0; gTH = th0;
+    gFuAct = fu0;
 }
+static void colador() {                  // pase base: siempre 64x48
+    coladorPinta(gBufCol, 64, 48);
+}
+
 #if defined(_WIN32)
 static DWORD __stdcall alVigilante(void* p) {
     (void)p;
@@ -1362,6 +1398,22 @@ static void blit(long long* c4, int dx, int dy) { // cache vigente: volcado
             unsigned int c = im[j * w + i];
             if ((c >> 24) & 255) px(dx + (int)i, dy + (int)j, c);
         }
+}
+static void blitEsc(long long* c4, float dx, float dy,  // cache a escala
+                    float dw, float dh) {
+    if (!c4 || dw < 1.0f || dh < 1.0f) return;
+    unsigned int* im = (unsigned int*)c4[0];
+    long w = (long)c4[1], h = (long)c4[2];
+    if (w < 1 || h < 1) return;
+    long tw = (long)dw, th = (long)dh;
+    for (long j = 0; j < th; j++) {
+        long sj = (long)((float)j * (float)h / (float)th);
+        for (long i = 0; i < tw; i++) {
+            unsigned int c = im[sj * w +
+                                (long)((float)i * (float)w / (float)tw)];
+            if ((c >> 24) & 255) px((int)(dx + (float)i), (int)(dy + (float)j), c);
+        }
+    }
 }
 // ---- [3D] modo 3D: la escena como tableros en profundidad, misma fila 'x' ----
 // Cada nodo visible es una placa (x,y = su caja; z = -1.1 * nivel): el padre
@@ -1576,6 +1628,24 @@ static void pinta3D() {
     gFuAct = 0;
     gImgGen = -1;                        // en 3D se repinta cada frame
 }
+static long long* cachePinta(Ser* c, long pintar) { // cache con pintura fresca
+    long w = extW(c), h = extH(c);
+    long long* c4 = cacheRow(c, w, h);
+    if (!c4) return 0;
+    if (!pintar) { c4[3] = -1; return c4; }   // invisible: cache vencida
+    long gv = gvUp(c);
+    if (gv == c4[3]) return c4;               // vigente: nada que hacer
+    unsigned int* sub = (unsigned int*)c4[0];
+    memset(sub, 0, (size_t)((long)c4[1] * (long)c4[2]) * sizeof(unsigned int));
+    unsigned int* tg0 = gTgt;
+    long tw0 = gTW, th0 = gTH;
+    gTgt = sub; gTW = (long)c4[1]; gTH = (long)c4[2];
+    pintaNodo(c, 3 - (float)(ccG(c, CI_X)) / QZ,   // pintado local al cache
+                 3 - (float)(ccG(c, CI_Y)) / QZ);
+    c4[3] = gv;
+    gTgt = tg0; gTW = tw0; gTH = th0;
+    return c4;
+}
 static void pintaTodo() {
     if (!gImg) return;
     if (g3D) { pinta3D(); return; }      // 3D: vista orbital de la escena
@@ -1589,23 +1659,14 @@ static void pintaTodo() {
         for (long i = 0; i < gRoot->nA; i++) {
             Ser* c = gRoot->A[i];
             if (!c || (((ccG(c, CI_FLG) & 8) != 0) != (pase == 1))) continue;
-            long w = extW(c), h = extH(c);
-            long long* c4 = cacheRow(c, w, h);
             long vis = ccG(c, CI_FLG) & 1;
             long pin = ccG(c, CI_FLG) & 8;
             int ax = (int)(ccG(c, CI_X) - (pin ? 0 : gCamX) - 3 * QZ) / QZ;
             int ay = (int)(ccG(c, CI_Y) - (pin ? 0 : gCamY) - 3 * QZ) / QZ;
-            long gv = gvUp(c);
-            limpia(ax, ay, w, h);                 // zona -> fondo
-            if (!vis) { c4[3] = -1; continue; }
-            if (gv == c4[3]) { blit(c4, ax, ay); continue; }
-            unsigned int* sub = (unsigned int*)c4[0];
-            memset(sub, 0, (size_t)((long)c4[1] * (long)c4[2]) * sizeof(unsigned int));
-            gTgt = sub; gTW = (long)c4[1]; gTH = (long)c4[2];
-            pintaNodo(c, 3 - (float)(ccG(c, CI_X)) / QZ,   // siempre en (3,3)
-                         3 - (float)(ccG(c, CI_Y)) / QZ);
-            c4[3] = gv;
-            gTgt = gImg; gTW = gW; gTH = gH;
+            limpia(ax, ay, extW(c), extH(c));     // zona -> fondo
+            if (!vis) continue;
+            long long* c4 = cachePinta(c, 1);     // fresco: repinta si cambio
+            if (!c4) continue;
             blit(c4, ax, ay);
         }
     }
@@ -3078,7 +3139,7 @@ static void pruebas() {
         long px = (long)(2.0f + (120.0f - 20.0f) * fs);   // centro de col B
         long py = (long)(2.0f + (70.0f - 40.0f) * fs);
         long pz = (long)(2.0f + (30.0f - 20.0f) * fs);    // solo col A tapa ahi
-        long pz2 = (long)(2.0f + (45.0f - 40.0f) * fs);
+        long pz2 = (long)(2.0f + (70.0f - 40.0f) * fs);
         printf("colador fit a imagen: %s (A=%08x B=%08x ver=%ld)\n",
                (gBufCol[py * 64 + px] == pr(0, 1, 0, 1)
                 && gBufCol[pz2 * 64 + pz] == pr(1, 0, 0, 1)
@@ -3086,6 +3147,36 @@ static void pruebas() {
                gBufCol[pz2 * 64 + pz], gBufCol[py * 64 + px],
                cf ? (long)cf[3] : -1);
         gColNodo = 0;
+        while (rr->nA > 0) { Ser* h2 = rr->A[rr->nA - 1]; rr->nA--; serAl(h2); }
+        serAl(rr);
+        gRoot = rv;
+    }
+    {   // colador a medida (nido camara): la camara pide su resolucion
+        Ser* rv = gRoot; gRoot = 0;
+        Ser* rr = serCr(0, 'r', "cR", "ColMed");
+        gRoot = rr;
+        Ser* cA = serCr(rr, 'r', "cA", "rojo");
+        ccS(cA, CI_X, 30 * QZ); ccS(cA, CI_Y, 40 * QZ);
+        ccS(cA, CI_W, 90 * QZ); ccS(cA, CI_H, 50 * QZ);
+        ccS(cA, CI_R, QZ); ccS(cA, CI_A, QZ); ccS(cA, CI_FLG, 1);
+        Ser* cB = serCr(rr, 'r', "cB", "verde");
+        ccS(cB, CI_X, 90 * QZ); ccS(cB, CI_Y, 40 * QZ);
+        ccS(cB, CI_W, 90 * QZ); ccS(cB, CI_H, 50 * QZ);
+        ccS(cB, CI_G, QZ); ccS(cB, CI_A, QZ); ccS(cB, CI_FLG, 1);
+        unsigned int* cb = (unsigned int*)xM((unsigned long)(180 * 120)
+                                             * sizeof(unsigned int));
+        coladorPinta(cb, 180, 120);
+        float f1 = 176.0f / (150.0f * QZ), f2 = 116.0f / (50.0f * QZ);
+        if (f2 < f1) f1 = f2;              // fit del colador a 180x120
+        long gy = (long)(2.0f + (80.0f - 40.0f) * (float)QZ * f1);
+        long gp = (long)(2.0f + (150.0f - 30.0f) * (float)QZ * f1);
+        long rp = (long)(2.0f + (60.0f - 30.0f) * (float)QZ * f1);
+        long gc = cb[gy * 180 + gp], rc = cb[gy * 180 + rp];
+        long fz = cb[100 * 180 + 5] == 0;  // rincon sin nodos: fondo limpio
+        printf("colador a medida (nido camara): %s (G=%08x R=%08x fz=%ld)\n",
+               (gc == pr(0, 1, 0, 1) && rc == pr(1, 0, 0, 1) && fz)
+               ? "PASA" : "FALLA", (unsigned)gc, (unsigned)rc, fz);
+        xMe((void*)cb);
         while (rr->nA > 0) { Ser* h2 = rr->A[rr->nA - 1]; rr->nA--; serAl(h2); }
         serAl(rr);
         gRoot = rv;
@@ -3839,8 +3930,23 @@ int PASCAL WinMain(HINSTANCE i, HINSTANCE p, LPSTR c, int s) {
         if (gCamNodo && __sync_lock_test_and_set(&gCamNva, 0))
             ordFeed(gCamNodo, gBufCam, 32, 24);   // embudo: el par aviso frame
         if ((gTic & 7) == 0) colador();           // pase del impar sobre el arbol
-        if (gColNodo && __sync_lock_test_and_set(&gColNva, 0))
-            ordFeed(gColNodo, gBufCol, 64, 48);   // embudo del colado
+        if (gColNodo && __sync_lock_test_and_set(&gColNva, 0)) {
+            long cw2 = ccG(gColNodo, CI_W) / QZ, ch2 = ccG(gColNodo, CI_H) / QZ;
+            if (cw2 < 16) cw2 = 16;
+            if (ch2 < 12) ch2 = 12;
+            if (cw2 > 2048) cw2 = 2048;      // tope del cache de camara
+            if (ch2 > 2048) ch2 = 2048;
+            if (gColImg && (gColWc != cw2 || gColHc != ch2)) {
+                xMe((void*)gColImg); gColImg = 0;
+            }
+            if (!gColImg) {
+                gColImg = (unsigned int*)xM((unsigned long)(cw2 * ch2)
+                                            * sizeof(unsigned int));
+                gColWc = cw2; gColHc = ch2;
+            }
+            coladorPinta(gColImg, cw2, ch2);  // colado a la res de la camara
+            ordFeed(gColNodo, gColImg, cw2, ch2);   // embudo del colado (nido)
+        }
         escritor();
         tickN9(gRoot);                       // contadores vivos por cuadro
         syncAyuda();                         // barra fija sigue al foco

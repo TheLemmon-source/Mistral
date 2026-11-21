@@ -84,14 +84,18 @@ La fuente del par ya no dibuja un degradado: **proyecta un cubo 3D girando**
 scanlines `triLleno`). El 3D no necesita nada nuevo: es la misma fila `'x'`
 `[img,w,h,ver]` que produce pixels y viaja por el mismo embudo/seqlock.
 El **colador** es el tercer paso, un pase del impar cada 8 tics: toma el bbox
-del mundo visible, lo ajusta a una imagen de 64x48 (`gBufCol`) y pinta las
-ramas con el color de su nodo, filtradas por puntaje con **tres pesos
-volatiles** `gColAnti`/`gColImp`/`gColUrg` (frescura: cada nodo guarda el
-tic de su ultimo toque en `s->ulti`, que `ccS` actualiza en cada asignacion;
-importancia: pin 900 / abierto 500 / visible 300; urgencia: filas SM 600).
-Lo colado alimenta la camara **Colado** (bezuel fijado, `gColNodo`) por el
-mismo embudo `gColNva`. Es el esqueleto del colador a imagen del roadmap:
-la escena condensada en una imagen que ya se puede anidar, guardar y serializar.
+del mundo visible y lo ajusta a la resolucion pedida. Ya no son rects crudos:
+cada rama sale **con el pintor real** (widgets, titulos, textos) desde el
+cache por version (`cachePinta`), volcado a escala (`blitEsc`), filtrado por
+puntaje con **tres pesos volatiles** `gColAnti`/`gColImp`/`gColUrg`
+(frescura: cada nodo guarda el tic de su ultimo toque en `s->ulti`, que
+`ccS` actualiza en cada asignacion; importancia: pin 900 / abierto 500 /
+visible 300; urgencia: filas SM 600). La base queda en `gBufCol` 64x48 para
+la bateria y, **anidado con camara**, la camara **Colado** (`gColNodo`)
+pide su propia resolucion: el embudo `gColNva` redibuja a ese tamano
+(`gColImg`, hasta 2048) y la alimenta con pixels nitidos. Es la base del
+colador a imagen del roadmap: la escena entera en una imagen que ya se
+puede anidar, guardar y serializar sin migrar nada despues.
 
 ## Camara global
 
@@ -332,7 +336,7 @@ En Dev-C++ (Proyecto Win32 GUI, C++11) o Makefile.win → target `Ser.o` +
 enlazado con `-luser32 -lgdi32`. Con ventana abre un editor de controles:
 botones, checks, sliders, redondeados, caches, sesiones anidadas.
 
-Sin modificar nada, `main()` corre primero la batería de pruebas (95/95 PASA,
+Sin modificar nada, `main()` corre primero la batería de pruebas (96/96 PASA,
 sin ventana) y escribe `ser_check.ppm` 800x520 como render de verificación.
 
 ## Formato
