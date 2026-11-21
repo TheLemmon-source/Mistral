@@ -141,6 +141,7 @@ static long removeD(const char* nom) {
 #define CI_TOP 17                      // [R] pool: C[CI_TOP+i] es el slot i
 #define CI_AGL 96                      // [P] polar: angulo en grados * QZ
 #define CI_RAD 97                      // [P] polar: radio en QZ (pulsos de 256)
+#define CI_ARC 98                      // [P] semiarco: barrido en grados * QZ
 
 // ---- [S] nucleo ser ---------------------------------------------------------
 static void* xM(unsigned long nb) {
@@ -1700,6 +1701,73 @@ static Ser* elige3D(float mx, float my) {
     }
     return r;
 }
+static void segArcos(Ser* t, float wx, float wy, float wz,
+                     float w, float hh, float dz) { // semiarco: banda curva
+    long arc = ccG(t, CI_ARC);
+    if (arc < 0) arc = -arc;
+    long pasos = 24;                     // barrido trozado en 24 segmentos
+    double pi = 3.14159265358979;
+    double a0 = (double)ccG(t, CI_AGL) / (double)QZ * (pi / 180.0);
+    double sp = (double)arc / (double)QZ * (pi / 180.0);
+    double ro = (double)w / 60.0;        // radio exterior (mundo: px / 30 / 2)
+    double ri = ro - (double)hh * 2.0;   // grosor de banda = alto H del nodo
+    if (ri < ro * 0.25) ri = ro * 0.25;  // banda minima
+    if (ri > ro) ri = ro * 0.25;
+    long long* c4 = 0;                   // textura: la imagen 'x' del nodo
+    for (long i = 0; i < t->nM; i++)
+        if (t->TM[i] && t->TM[i][0] == 'x' && t->M[i]) c4 = (long long*)t->M[i];
+    unsigned int* im2 = c4 ? (unsigned int*)c4[0] : 0;
+    long iw = c4 ? (long)c4[1] : 0, ih = c4 ? (long)c4[2] : 0;
+    float fr = (float)ccG(t, CI_R) / QZ, fg2 = (float)ccG(t, CI_G) / QZ;
+    float fb = (float)ccG(t, CI_B) / QZ;
+    float sY = (float)sin((double)g3Az);   // nz = 0: entra solo el giro en azimut
+    float cX = (float)cos((double)g3El), sX = (float)sin((double)g3El);
+    for (long s2 = 0; s2 < pasos; s2++) {
+        double f0 = (double)s2 / pasos, f1 = (double)(s2 + 1) / pasos;
+        double r0 = a0 + sp * f0, r1 = a0 + sp * f1;
+        double am = a0 + sp * (f0 + f1) * 0.5;
+        float nx = (float)cos(am), ny = (float)sin(am);
+        float z2 = -nx * sY;             // banda en el piso (nz = 0)
+        float rz2 = ny * sX + z2 * cX;
+        float ry2 = ny * cX - z2 * sX;
+        float sh = 0.35f + 0.65f * (0.4f - rz2 * 0.7f + 0.6f * ry2 + 0.4f * rz2);
+        if (sh < 0.2f) sh = 0.2f;
+        if (sh > 1.0f) sh = 1.0f;
+        unsigned int col;
+        if (im2 && iw > 0 && ih > 0) {   // texturizado: un sampleo por segmento
+            long tu = (long)((f0 + f1) * 0.5 * (double)iw);
+            if (tu >= iw) tu = iw - 1;
+            long tv = ih / 2; if (tv >= ih) tv = ih - 1;
+            unsigned int px2 = im2[tv * iw + tu];
+            col = pr((float)((px2 >> 16) & 255) / 255.0f * sh,
+                     (float)((px2 >> 8) & 255) / 255.0f * sh,
+                     (float)(px2 & 255) / 255.0f * sh, 1.0f);
+        } else
+            col = pr(fr * sh, fg2 * sh, fb * sh, 1.0f);
+        unsigned int colO = pr((float)((col >> 16) & 255) / 255.0f * 0.7f,
+                               (float)((col >> 8) & 255) / 255.0f * 0.7f,
+                               (float)(col & 255) / 255.0f * 0.7f, 1.0f);
+        float ax0, ay0, ax1, ay1, ix1, iy1, ix0, iy0, qw;
+        pr3(wx + (float)(cos(r0) * ro), wy + (float)(sin(r0) * ro),
+            wz + dz, &ax0, &ay0, &qw);
+        pr3(wx + (float)(cos(r1) * ro), wy + (float)(sin(r1) * ro),
+            wz + dz, &ax1, &ay1, &qw);
+        pr3(wx + (float)(cos(r1) * ri), wy + (float)(sin(r1) * ri),
+            wz + dz, &ix1, &iy1, &qw);
+        pr3(wx + (float)(cos(r0) * ri), wy + (float)(sin(r0) * ri),
+            wz + dz, &ix0, &iy0, &qw);
+        triLleno(gImg, gW, gH, ax0, ay0, ax1, ay1, ix1, iy1, col);
+        triLleno(gImg, gW, gH, ax0, ay0, ix1, iy1, ix0, iy0, col);
+        float x1, y1, x0, y0;
+        pr3(wx + (float)(cos(r1) * ro), wy + (float)(sin(r1) * ro),
+            wz, &x1, &y1, &qw);          // canto exterior: todo el espesor
+        pr3(wx + (float)(cos(r0) * ro), wy + (float)(sin(r0) * ro),
+            wz, &x0, &y0, &qw);
+        triLleno(gImg, gW, gH, ax0, ay0, ax1, ay1, x1, y1, colO);
+        triLleno(gImg, gW, gH, ax0, ay0, x1, y1, x0, y0, colO);
+    }
+}
+
 static void pinta3D() {
     if (!gImg || !gRoot) return;
     long gFS0 = gFS;
@@ -1720,6 +1788,15 @@ static void pinta3D() {
         long e3x = 0, e3y = 0; posEf(t, &e3x, &e3y);
         long x = e3x / QZ, y = e3y / QZ;
         long w = ccG(t, CI_W) / QZ, h = ccG(t, CI_H) / QZ;
+        if (ccG(t, CI_ARC) != 0) {           // la banda vive fuera del rect:
+            long cxA = x + w / 2, cyA = y + h / 2;   // el anillo entra al bbox
+            long rp = (w > h ? w : h) / 2 + 2;
+            if (cxA - rp < bx0) bx0 = cxA - rp;
+            if (cyA - rp < by0) by0 = cyA - rp;
+            if (cxA + rp > bx1) bx1 = cxA + rp;
+            if (cyA + rp > by1) by1 = cyA + rp;
+            continue;
+        }
         if (x < bx0) bx0 = x;
         if (y < by0) by0 = y;
         if (x + w > bx1) bx1 = x + w;
@@ -1758,9 +1835,14 @@ static void pinta3D() {
             if (w > 1200.0f) w = 1200.0f;        // placas gigantes: tope
             if (h > 1200.0f) h = 1200.0f;
             float hw = w / 60.0f, hh = h / 60.0f, dz = 0.35f;
-            float wx = (float)ccG(t, CI_X) / QZ / 30.0f + hw - ccx;
-            float wy = (float)ccG(t, CI_Y) / QZ / 30.0f + hh - ccy;
+            long e4x = 0, e4y = 0; posEf(t, &e4x, &e4y);
+            float wx = (float)e4x / QZ / 30.0f + hw - ccx;
+            float wy = (float)e4y / QZ / 30.0f + hh - ccy;
             float wz = -1.1f * (float)niv;
+            if (ccG(t, CI_ARC) != 0) {   // semiarco: banda curva en el piso
+                segArcos(t, wx, wy, wz, w, hh, dz);
+                continue;                // sin caja
+            }
             float pxc[8], pyc[8], pzc[8];
             for (long c = 0; c < 8; c++)
                 pr3(wx + ((c & 1) ? hw : -hw), wy + ((c & 2) ? hh : -hh),
@@ -3494,6 +3576,57 @@ static void pruebas() {
         printf("arco al fol se ve en 3D: %s (%ld px)\n",
                wr > 8 ? "PASA" : "FALLA", wr);
         g3D = 0; gImgGen = -1;
+        pintaTodo();
+    }
+    {   // semiarco 3D: banda curva con y sin textura
+        Ser* rv = gRoot; gRoot = 0;
+        Ser* rr = serCr(0, 'r', "cR", "Arcos");
+        gRoot = rr;
+        Ser* a1 = serCr(rr, 'o', "a1", "Arco");
+        ccS(a1, CI_X, 30 * QZ); ccS(a1, CI_Y, 30 * QZ);
+        ccS(a1, CI_W, 320 * QZ); ccS(a1, CI_H, 30 * QZ);
+        ccS(a1, CI_R, QZ); ccS(a1, CI_A, QZ); ccS(a1, CI_FLG, 1);
+        ccS(a1, CI_AGL, 0); ccS(a1, CI_ARC, 90 * QZ);   // cuarto de anillo
+        unsigned int fnd = pr(0.05f, 0.06f, 0.09f, 1.0f);
+        g3D = 1; gImgGen = -1;
+        pintaTodo();                       // banda de color puro (sin textura)
+        long nzA = 0;
+        for (unsigned long i = 0; i < (unsigned long)gW * (unsigned long)gH; i++)
+            if (gImg[i] != fnd) nzA++;
+        long long* c4 = camRow(a1, 32, 8); // textura: azul en todo el ancho
+        for (long i = 0; i < 32 * 8; i++)
+            ((unsigned int*)c4[0])[i] = pr(0.1f, 0.2f, 0.9f, 1.0f);
+        c4[3] = 5;
+        gImgGen = -1;
+        pintaTodo();                       // banda texturizada (azul sombreado)
+        long azul = 0;
+        for (unsigned long i = 0; i < (unsigned long)gW * (unsigned long)gH; i++) {
+            unsigned int px = gImg[i];
+            long b1 = (long)(px & 255), g1 = (long)((px >> 8) & 255);
+            long r1 = (long)((px >> 16) & 255);
+            if (b1 > g1 && b1 > r1 && b1 > 120) azul++;
+        }
+        printf("semiarco 3D pinta la banda: %s (%ld px banda, %ld azules)\n",
+               (nzA > 400 && azul > 60) ? "PASA" : "FALLA", nzA, azul);
+        ccS(a1, CI_ARC, 0);                // misma geometria como caja:
+        gImgGen = -1;                      // color puro, ni un azul texturizado
+        pintaTodo();
+        long nzC = 0, azulC = 0;
+        for (unsigned long i = 0; i < (unsigned long)gW * (unsigned long)gH; i++) {
+            unsigned int px = gImg[i];
+            if (px != fnd) nzC++;
+            long b1 = (long)(px & 255);
+            if (b1 > (long)((px >> 8) & 255) && b1 > (long)((px >> 16) & 255)
+                && b1 > 120) azulC++;
+        }
+        printf("semiarco vs caja (banda %ld px, caja %ld px, azules banda %ld / caja %ld): %s\n",
+               nzA, nzC, azul, azulC,
+               (nzC > 400 && azulC * 4 < azul) ? "PASA" : "FALLA");
+        g3D = 0; gImgGen = -1;
+        pintaTodo();                       // escena original de vuelta
+        serAl(rr);
+        gRoot = rv;
+        gImgGen = -1;
         pintaTodo();
     }
     Ser* uk = 0;                         // check demo: por tipo, no por puesto

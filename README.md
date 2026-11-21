@@ -394,6 +394,25 @@ efectivo = declarada + radio * (cos, sin) en grados * QZ:
 - El doc de escena imprime la posicion efectiva y anota
   `polar: radio R grados G` en cada nodo con radio activo.
 
+## Semi-arcos texturizados en 3D
+
+Tercer canal polar, `CI_ARC` (barrido en grados * QZ) sobre la base
+`CI_AGL`/`CI_RAD`: un nodo con `CI_ARC != 0` deja de ser una caja y se
+dibuja en 3D como **banda curva de 24 segmentos** que arranca en el
+angulo `CI_AGL` y barre `CI_ARC` grados.
+
+- Geometria ancla al tamano declarado: radio exterior = W/2, grosor de
+  la banda = H (interior clampado a 1/4 del exterior); altura = la
+  misma placa de las cajas (`dz`).
+- Textura = la matriz `'x'` del nodo, muestreada por segmento en el
+  centro horizontal del tramo; sin textura cae al color del nodo.
+- Sombreado consistente con las caras (misma normal teorica por
+  azimut) y canto exterior oscurecido x0.7 como el resto del 3D.
+- El bbox 3D cubre el anillo completo (centro +/- radio maximo), y el
+  bloque de placas tambien se posiciona por `posEf`: polar + arco
+  conviven.
+- `CI_ARC = 0` = caja de siempre; nada de lo existente cambia.
+
 ## Compilar
 
 Con GCC (MinGW64 en Windows):
@@ -406,7 +425,7 @@ En Dev-C++ (Proyecto Win32 GUI, C++11) o Makefile.win → target `Ser.o` +
 enlazado con `-luser32 -lgdi32`. Con ventana abre un editor de controles:
 botones, checks, sliders, redondeados, caches, sesiones anidadas.
 
-Sin modificar nada, `main()` corre primero la batería de pruebas (109/109 PASA,
+Sin modificar nada, `main()` corre primero la batería de pruebas (111/111 PASA,
 sin ventana) y escribe `ser_check.ppm` 800x520 como render de verificación.
 
 ## Formato
