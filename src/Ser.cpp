@@ -135,6 +135,8 @@ static long removeD(const char* nom) {
 #define CI_EXT 12
 #define CI_SEL 13
 #define CI_MAX 14
+#define CI_PON 14                      // [R] pool de reservas: cantidad de slots
+#define CI_TOP 15                      // [R] pool: C[CI_TOP+i] es el slot i
 
 // ---- [S] nucleo ser ---------------------------------------------------------
 static void* xM(unsigned long nb) {
@@ -195,6 +197,18 @@ static Ser** serPool = 0; static long serPoolN = 0, serPoolU = 0;
 static volatile long gVivos = 0, gGen = 1;   // gen: version global (cache)
 static volatile long gTic = 0;               // tic cronologico del vigilante (par)
 
+// ---- [CA] contadores por sistema: telemetria atomica del sistema vivo --------
+#define CA_SER   0                              // seres creados
+#define CA_MUER  1                              // seres liberados
+#define CA_MAT   2                              // matrices con datos pedidas
+#define CA_FIL   3                              // filas SM ejecutadas
+#define CA_ORD   4                              // ordenes drenadas por escritor
+#define CA_RES   5                              // reservas CAS tomadas
+#define CA_EXP   6                              // exportes (PPM/PNG/DOC)
+#define CA_N     8
+static volatile long gCa[CA_N];                 // contadores Ca[] del sistema
+static void caSuma(long i) { __sync_fetch_and_add(&gCa[i], 1); }
+
 static Ser* serCr(Ser* fol, char tc, const char* n2, const char* lb) {
     Ser* s;
     if (serPoolU > 0) { s = serPool[--serPoolU]; s->vr++; }
@@ -217,6 +231,7 @@ static Ser* serCr(Ser* fol, char tc, const char* n2, const char* lb) {
         if (k < 0) { k = fol->nA; if (k >= fol->cA) grC(fol, k); fol->nA = k + 1; }
         fol->A[k] = s;
     }
+    caSuma(CA_SER);
     gVivos++;
     return s;
 }
@@ -236,6 +251,7 @@ static void serAl(Ser* s) {
     }
     s->nM = 0;
     s->tc = 0;                           // muerto: tc != 0 significa vivo
+    caSuma(CA_MUER);
     if (serPoolU >= serPoolN) {          // pool: capacidad real, no declarada
         Ser** op = (Ser**)realloc(serPool, (serPoolN + 8) * sizeof(Ser*));
         if (!op) exit(1);
@@ -256,6 +272,33 @@ static void ccS(Ser* s, long i, long v) {
     s->ulti = gTic;                      // ultimo toque: frescura para el colador
     s->vr++;
     gGen++;
+}
+
+// ---- [R] pool de reservas CAS: slots en C[CI_TOP..CI_TOP+CI_PON) -------------
+//        slot en 0 (libre) o 1 (tomado); toma y suelta son atomicas.
+static void resFija(Ser* s, long n) {    // arma o redimensiona el pool
+    if (n < 0) n = 0;
+    if (n > 64) n = 64;                  // tope sanitario
+    ccS(s, CI_PON, n);
+    for (long i = 0; i < n; i++) ccS(s, CI_TOP + i, 0);
+}
+static long resToma(Ser* s) {            // 1er slot libre via CAS; -1 si lleno
+    long n = ccG(s, CI_PON);
+    for (long i = 0; i < n; i++)
+        if (__sync_bool_compare_and_swap(&s->C[CI_TOP + i], 0, 1)) {
+            caSuma(CA_RES);
+            return i;
+        }
+    return -1;
+}
+static void resSuelta(Ser* s, long i) {  // libera el slot i via CAS
+    if (i < 0 || i >= ccG(s, CI_PON)) return;
+    __sync_bool_compare_and_swap(&s->C[CI_TOP + i], 1, 0);
+}
+static long resVivos(Ser* s) {           // slots tomados ahora
+    long n = ccG(s, CI_PON), v = 0;
+    for (long i = 0; i < n; i++) if (ccG(s, CI_TOP + i)) v++;
+    return v;
 }
 
 // ---- [U] deshacer: log de asignaciones por grupos ----------------------------
@@ -373,6 +416,7 @@ static double* f6Add(Ser* s, double cond, double ci, double cmp,
     if (s->M[k]) xMe(s->M[k]);
     s->M[k] = xM(6 * sizeof(double));
     s->TM[k] = (char*)"f6";
+    caSuma(CA_MAT);
     double* f = (double*)s->M[k];
     f[0] = cond; f[1] = ci; f[2] = cmp; f[3] = op; f[4] = dst; f[5] = arg;
     return f;
@@ -388,6 +432,7 @@ static double* n9Add(Ser* s, double dst, double delta, double mn, double mx,
     if (s->M[k]) xMe(s->M[k]);
     s->M[k] = xM(9 * sizeof(double));
     s->TM[k] = (char*)"n9";
+    caSuma(CA_MAT);
     double* n = (double*)s->M[k];
     n[0] = dst; n[1] = delta; n[2] = mn; n[3] = mx;
     n[4] = rmn; n[5] = rmx; n[6] = cmn; n[7] = cmx; n[8] = act;
@@ -426,6 +471,7 @@ static void exRows(Ser* s) {              // ejecucion de filas SM del nodo
             long cap = arg;
             if (cap < 1) cap = 1;
             if (tco && s->nA < cap) ordCr(tco, s);
+            caSuma(CA_FIL);
             s->vr++; gGen++;
             continue;
         }
@@ -436,11 +482,25 @@ static void exRows(Ser* s) {              // ejecucion de filas SM del nodo
             if (dk >= 0 && dk < s->fol->nC) d = &s->fol->C[dk];
         }
         if (!d) continue;
+        if (op == 6) {                   // reserva CAS: dst = slot tomado + 1
+            *d = resToma(s) + 1;
+            caSuma(CA_FIL);
+            s->vr++; gGen++;
+            continue;
+        }
+        if (op == 7) {                   // soltar el slot arg; dst queda en 0
+            resSuelta(s, arg);
+            *d = 0;
+            caSuma(CA_FIL);
+            s->vr++; gGen++;
+            continue;
+        }
         if (op == 0) *d = arg;                      // asignacion
         else if (op == 1) *d += arg;
         else if (op == 2) *d ^= arg;
         else if (op == 3) { if (*d > arg) *d = arg; if (*d < cmp) *d = cmp; }
         else if (op == 4) *d *= arg;
+        caSuma(CA_FIL);
         s->vr++; gGen++;
         if (dst < 0 && s->fol) s->fol->vr++;        // el fol tambien cambia
     }
@@ -1850,6 +1910,11 @@ static void docRec(FILE* f, Ser* t, long prof) {     // el arbol como documento
         fprintf(f, "fila: cond %g ci %g cmp %g op %g dst %g arg %g\n",
                 r6[0], r6[1], r6[2], r6[3], r6[4], r6[5]);
     }
+    if (ccG(t, CI_PON) > 0) {                        // pool de reservas activo
+        for (long i = 0; i <= prof; i++) fprintf(f, "  ");
+        fprintf(f, "pool: %ld de %ld slots ocupados\n",
+                resVivos(t), ccG(t, CI_PON));
+    }
     for (long i = 0; i < t->nA; i++) docRec(f, t->A[i], prof + 1);
 }
 static long docEscena(const char* nom) {
@@ -1857,6 +1922,10 @@ static long docEscena(const char* nom) {
     if (!f) return 0;
     fprintf(f, "Documento de escena - Ser\n");
     fprintf(f, "tic %ld\n", gTic);
+    fprintf(f, "contadores ca ser %ld muertes %ld matrices %ld filas %ld\n",
+            gCa[CA_SER], gCa[CA_MUER], gCa[CA_MAT], gCa[CA_FIL]);
+    fprintf(f, "contadores ca ordenes %ld reservas %ld exportes %ld\n",
+            gCa[CA_ORD], gCa[CA_RES], gCa[CA_EXP]);
     docRec(f, gRoot, 0);
     fclose(f);
     return 1;
@@ -1866,6 +1935,7 @@ static long docEscena(const char* nom) {
 static void escritor() {
     while (oTail != oHead) {
         Ord* o = &oRing[oTail & 255];
+        if (o->k >= 10) caSuma(CA_EXP);
         if (o->k == 0) {                         // asignacion condicional
             Ser* t = o->t;
             if (t) {
@@ -2024,6 +2094,7 @@ static void escritor() {
         } else if (o->k == 12) {                  // documento de escena legible
             docEscena("ser_doc.txt");
         }
+        caSuma(CA_ORD);
         oTail = oTail + 1;
     }
     for (long z = 0; z < 256; z++) oRing[z].tx = 0;   // tras drenar todo
@@ -3754,6 +3825,72 @@ static void pruebas() {
                (nod > 3 && fil > 0) ? "PASA" : "FALLA");
         removeD("ser_doc.txt");
     }
+    {   // pool de reservas CAS: tomar, agotar, soltar, reusar
+        Ser* rv = gRoot; gRoot = 0;
+        long s0 = gCa[CA_RES];
+        Ser* p = serCr(0, 'p', "pl", "Pool");
+        resFija(p, 2);
+        long a1 = resToma(p);
+        long a2 = resToma(p);
+        long lleno = resToma(p);         // pool agotado
+        long viv = resVivos(p);
+        resSuelta(p, 0);
+        long reu = resToma(p);           // reusa el hueco libre
+        int okP = (a1 == 0 && a2 == 1 && lleno == -1 && viv == 2
+                   && reu == 0 && resVivos(p) == 2
+                   && gCa[CA_RES] == s0 + 3);
+        printf("pool de reservas CAS (toma/suelta/reusa): %s\n",
+               okP ? "PASA" : "FALLA");
+        serAl(p);
+        gRoot = rv;
+    }
+    {   // filas SM con reservas: op 6 toma, op 7 suelta, determinista por pasada
+        Ser* rv = gRoot; gRoot = 0;
+        Ser* p = serCr(0, 'p', "pr", "Reserva");
+        resFija(p, 1);
+        // pasada: toma, agotado = 0, suelta, reusa; igual en cada pasada
+        f6Add(p, 0, 0, 0, 6, CI_EXT, 0);          // reserva -> EXT = slot + 1
+        f6Add(p, 0, 0, 0, 6, CI_VAL, 0);          // pool lleno -> VAL = 0
+        f6Add(p, 0, 0, 0, 7, CI_EXT, 0);          // suelta slot 0
+        f6Add(p, 0, 0, 0, 6, CI_VAL, 0);          // hueco reusado -> VAL = 1
+        exRows(p);
+        int okF = (ccG(p, CI_EXT) == 0 && ccG(p, CI_VAL) == 1
+                   && resVivos(p) == 1 && ccG(p, CI_TOP) == 1);
+        exRows(p);                                 // segunda pasada: mismas marcas
+        int okG = (ccG(p, CI_EXT) == 0 && ccG(p, CI_VAL) == 1
+                   && resVivos(p) == 1 && ccG(p, CI_TOP) == 1);
+        printf("filas SM de reservas (op 6/7): %s (toma=%d suelta=%d)\n",
+               (okF && okG) ? "PASA" : "FALLA", okF, okG);
+        serAl(p);
+        gRoot = rv;
+    }
+    {   // contadores Ca: sistema vivo medible, doc de escena los lista
+        Ser* rv = gRoot; gRoot = 0;
+        long vS0 = gCa[CA_SER], vF0 = gCa[CA_FIL], vO0 = gCa[CA_ORD];
+        Ser* p = serCr(0, 'p', "cA", "Conta");
+        ccS(p, CI_VAL, 0);               // nodo reciclado: estado viejo fuera
+        f6Add(p, 0, 0, 0, 1, CI_VAL, 7);
+        exRows(p);
+        long dS = gCa[CA_SER] - vS0, dF = gCa[CA_FIL] - vF0;
+        long v7 = ccG(p, CI_VAL);
+        ordP(0, p, CI_VAL, 9, 0, 0, 0, 0); escritor();
+        long dO = gCa[CA_ORD] - vO0;
+        docEscena("ser_doc.txt");
+        long hadC = 0;
+        FILE* e5 = fopenD("ser_doc.txt", "rb");
+        if (e5) {
+            char li[256];
+            while (fgets(li, sizeof(li), e5))
+                if (strstr(li, "contadores ca ")) hadC++;
+            fclose(e5);
+        }
+        removeD("ser_doc.txt");
+        int okA = (dS == 1 && dF >= 1 && dO >= 1 && v7 == 7 && hadC >= 2);
+        printf("contadores Ca (ser/filas/ordenes/doc): %s\n",
+               okA ? "PASA" : "FALLA");
+        serAl(p);
+        gRoot = rv;
+    }
     FILE* o = fopenD("ser_check.ppm", "wb");
     if (o) {
         fprintf(o, "P6\n%ld %ld\n255\n", gW, gH);
@@ -3769,6 +3906,8 @@ static void pruebas() {
     for (long i = 0; i < gCemN; i++) serAl(gCem[i]);   // cementerio fuera
     gCemN = 0;
     printf("seres: %ld vivos (%ld antes)\n", gVivos, vivos0);
+    printf("contadores: ser %ld filas %ld ordenes %ld reservas %ld exportes %ld\n",
+           gCa[CA_SER], gCa[CA_FIL], gCa[CA_ORD], gCa[CA_RES], gCa[CA_EXP]);
     fuenteLibera(&gFuUI);                // tipografias de datos: fuera
     fuenteLibera(&gFu3D);
     xMe((void*)gImg); gImg = 0;      // sin fuga al salir
