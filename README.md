@@ -291,7 +291,8 @@ Los datos del programa ya no caen regados por el directorio actual: viven
 en una carpeta con el nombre del exe, en la carpeta donde el exe reside.
 `Ser.exe` en `C:\algo\` usa `C:\algo\Ser\`; ahi dentro van el layout
 (`oroga.dbg`), las tipografias por contexto (`fuente-ui.txt`,
-`fuente-3d.txt`) y los exportes (`ser_exp.ppm`, `ser_check.ppm`).
+`fuente-3d.txt`) y los exportes (`ser_exp.ppm`, `ser_exp.png`,
+`ser_doc.txt`, `ser_check.ppm`).
 
 La raiz se arma una sola vez al arrancar (idempotente, con separador
 final listo para ramas) y todo acceso a datos pasa por `fopenD`/
@@ -299,6 +300,25 @@ final listo para ramas) y todo acceso a datos pasa por `fopenD`/
 (subcarpetas de fuentes, escenas, documentos) se agregan sin
 reconstruir lecturas por arbol de directorios. Sin extension el nombre
 lleva sufijo `_d` para no chocar con el propio exe.
+
+## Exportes: PNG propio y documento de escena
+
+La imagen pintada sale a dos formatos sin tocar librerias externas:
+
+- **PNG** (tecla `I`, boton del menu derecho, orden escritor `k==11`):
+  `ser_exp.png`, RGB 8 bits, deflate a mano en bloques guardados
+  (CRC32 reflexivo por chunk, adler32 al final del stream zlib, NLEN
+  complementado). Si lo abre un visor, es porque cumple.
+- **Documento de escena** (tecla `O`, boton del menu, orden `k==12`):
+  `ser_doc.txt`, el arbol completo indentado por profundidad, cada nodo
+  con tipo, etiqueta, tamano, posicion y valor, mas sus filas SM al pie:
+  la escena entera en texto legible.
+
+En 3D la escena ahora muestra **rejilla de piso** al fondo del ultimo
+nivel, **regla de profundidad** con marcas `N0..Nn` por nivel (cada uno
+vive en su lamina z) y las placas de nodos alineadas con centros,
+etiquetas y cables: antes el ancho de placa se escalaba en otra unidad
+y caian fuera de la proyeccion.
 
 ## Compilar
 
@@ -312,7 +332,7 @@ En Dev-C++ (Proyecto Win32 GUI, C++11) o Makefile.win → target `Ser.o` +
 enlazado con `-luser32 -lgdi32`. Con ventana abre un editor de controles:
 botones, checks, sliders, redondeados, caches, sesiones anidadas.
 
-Sin modificar nada, `main()` corre primero la batería de pruebas (92/92 PASA,
+Sin modificar nada, `main()` corre primero la batería de pruebas (95/95 PASA,
 sin ventana) y escribe `ser_check.ppm` 800x520 como render de verificación.
 
 ## Formato

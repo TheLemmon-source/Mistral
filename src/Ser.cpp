@@ -1472,8 +1472,8 @@ static void pinta3D() {
             if (w > 1200.0f) w = 1200.0f;        // placas gigantes: tope
             if (h > 1200.0f) h = 1200.0f;
             float hw = w / 60.0f, hh = h / 60.0f, dz = 0.35f;
-            float wx = (float)ccG(t, CI_X) / QZ + hw - ccx;
-            float wy = (float)ccG(t, CI_Y) / QZ + hh - ccy;
+            float wx = (float)ccG(t, CI_X) / QZ / 30.0f + hw - ccx;
+            float wy = (float)ccG(t, CI_Y) / QZ / 30.0f + hh - ccy;
             float wz = -1.1f * (float)niv;
             float pxc[8], pyc[8], pzc[8];
             for (long c = 0; c < 8; c++)
@@ -1519,6 +1519,43 @@ static void pinta3D() {
             if (g3Se[j] && g3Se[j]->fol == g3Se[i] && arFol(g3Se[j]))
                 linea((long)g3Px[j], (long)g3Py[j],
                       (long)g3Px[i], (long)g3Py[i], wc);
+    if (bx1 > bx0 && by1 > by0) {
+        long nmax = 0;
+        for (long i = 0; i < g3N3; i++) if (g3Nv[i] > nmax) nmax = g3Nv[i];
+        float ccx = (float)(bx0 + bx1) * 0.5f / 30.0f;
+        float ccy = (float)(by0 + by1) * 0.5f / 30.0f;
+        float zf = -1.1f * (float)nmax;      // piso: al fondo del ultimo nivel
+        unsigned int gcp = pr(0.13f, 0.16f, 0.22f, 1.0f);
+        float x0m = (float)bx0 / 30.0f - ccx, x1m = (float)bx1 / 30.0f - ccx;
+        float y0m = (float)by0 / 30.0f - ccy, y1m = (float)by1 / 30.0f - ccy;
+        for (long gx = ((bx0 - 1) / 60) * 60; gx <= bx1; gx += 60) {
+            float a1, b1, a2, b2, qw;
+            pr3((float)gx / 30.0f - ccx, y0m, zf, &a1, &b1, &qw);
+            pr3((float)gx / 30.0f - ccx, y1m, zf, &a2, &b2, &qw);
+            linea((long)a1, (long)b1, (long)a2, (long)b2, gcp);
+        }
+        for (long gy = ((by0 - 1) / 60) * 60; gy <= by1; gy += 60) {
+            float a1, b1, a2, b2, qw;
+            pr3(x0m, (float)gy / 30.0f - ccy, zf, &a1, &b1, &qw);
+            pr3(x1m, (float)gy / 30.0f - ccy, zf, &a2, &b2, &qw);
+            linea((long)a1, (long)b1, (long)a2, (long)b2, gcp);
+        }
+        float xr = (float)bx0 / 30.0f - ccx - 0.8f;   // regla de profundidad
+        long gFSr = gFS;
+        gFS = 1;
+        for (long niv = 0; niv <= nmax; niv++) {
+            float zp = -1.1f * (float)niv;
+            float a1, b1, a2, b2, qw;
+            pr3(xr, y0m, zp, &a1, &b1, &qw);
+            pr3(xr, y0m + 0.8f, zp, &a2, &b2, &qw);
+            linea((long)a1, (long)b1, (long)a2, (long)b2, wc);
+            char et[8];
+            et[0] = 'N'; et[1] = (char)('0' + (niv % 10)); et[2] = 0;
+            texto((float)a1 + 2.0f, (float)b1 - 3.0f, et,
+                  pr(0.35f, 0.4f, 0.5f, 1.0f));
+        }
+        gFS = gFSr;
+    }
     gFS = 2;                             // etiquetas: planas, siempre legibles
     for (long i = 0; i < g3N3; i++) {
         Ser* t = g3Se[i];
@@ -1638,6 +1675,131 @@ static Ser* gSel = 0; static Ser* gAnt = 0;   // seleccion actual y previa
 static Ser* gArra = 0;               // nodo arrastrado
 static float gDOffX, gDOffY;          // anclaje del arrastre
 static int   gSlid = 0;               // arrastrando un slider
+
+// ---- [EX] exportes: PNG sin librerias + documento de escena ------------------
+static unsigned int exTab[256];          // crc32 de mesa propia: sin zlib
+static long exTabOK = 0;
+static unsigned int crcIni(void) { return 0xFFFFFFFFu; }
+static unsigned int crcUpd(unsigned int c, const unsigned char* d, long n) {
+    if (!exTabOK) {
+        for (unsigned int i2 = 0; i2 < 256; i2++) {
+            unsigned int k = i2;
+            for (long j = 0; j < 8; j++)
+                k = (k & 1) ? (0xEDB88320u ^ (k >> 1)) : (k >> 1);
+            exTab[i2] = k;
+        }
+        exTabOK = 1;
+    }
+    for (long i = 0; i < n; i++) c = exTab[(c ^ d[i]) & 255] ^ (c >> 8);
+    return c;
+}
+static unsigned int crcFin(unsigned int c) { return c ^ 0xFFFFFFFFu; }
+static unsigned int adlerD(const unsigned char* d, long n) {
+    unsigned int a = 1, b = 0;
+    for (long i = 0; i < n; i++) {
+        a = (a + d[i]) % 65521u;
+        b = (b + a) % 65521u;
+    }
+    return (b << 16) | a;
+}
+static void grChunk(FILE* f, const char* tip, const unsigned char* d, long n) {
+    unsigned char be[8];
+    be[0] = (unsigned char)((n >> 24) & 255);
+    be[1] = (unsigned char)((n >> 16) & 255);
+    be[2] = (unsigned char)((n >> 8) & 255);
+    be[3] = (unsigned char)(n & 255);
+    fwrite(be, 1, 4, f);
+    fwrite(tip, 1, 4, f);
+    if (n > 0 && d) fwrite(d, 1, (unsigned long)n, f);
+    unsigned int cc = crcIni();
+    cc = crcUpd(cc, (const unsigned char*)tip, 4);
+    if (n > 0 && d) cc = crcUpd(cc, d, n);
+    cc = crcFin(cc);
+    be[0] = (unsigned char)((cc >> 24) & 255);
+    be[1] = (unsigned char)((cc >> 16) & 255);
+    be[2] = (unsigned char)((cc >> 8) & 255);
+    be[3] = (unsigned char)(cc & 255);
+    fwrite(be, 1, 4, f);
+}
+static long pngGraba(const char* nom, unsigned int* im, long w, long h) {
+    if (!im || w < 1 || h < 1 || w > 8192 || h > 8192) return 0;
+    FILE* f = fopenD(nom, "wb");
+    if (!f) return 0;
+    static const unsigned char firma[8] = { 137, 80, 78, 71, 13, 10, 26, 10 };
+    fwrite(firma, 1, 8, f);
+    long cru = w * 3 + 1;                // fila frames: filtro 0 + RGB
+    unsigned char ih[13];
+    ih[0] = (unsigned char)((w >> 24) & 255);
+    ih[1] = (unsigned char)((w >> 16) & 255);
+    ih[2] = (unsigned char)((w >> 8) & 255);
+    ih[3] = (unsigned char)(w & 255);
+    ih[4] = (unsigned char)((h >> 24) & 255);
+    ih[5] = (unsigned char)((h >> 16) & 255);
+    ih[6] = (unsigned char)((h >> 8) & 255);
+    ih[7] = (unsigned char)(h & 255);
+    ih[8] = 8; ih[9] = 2; ih[10] = 0; ih[11] = 0; ih[12] = 0;   // 8 bits, RGB
+    grChunk(f, "IHDR", ih, 13);
+    unsigned char* crudo = (unsigned char*)xM((unsigned long)(cru * h));
+    for (long y = 0; y < h; y++) {
+        crudo[y * cru] = 0;
+        for (long x = 0; x < w; x++) {
+            unsigned int pv = im[y * w + x];
+            crudo[y * cru + 1 + x * 3] = (unsigned char)((pv >> 16) & 255);
+            crudo[y * cru + 2 + x * 3] = (unsigned char)((pv >> 8) & 255);
+            crudo[y * cru + 3 + x * 3] = (unsigned char)(pv & 255);
+        }
+    }
+    long nb2 = (cru * h + 65534) / 65535;// zlib: bloques GUARDADOS, fiables
+    unsigned char* z = (unsigned char*)xM((unsigned long)(2 + nb2 * 5
+                                           + cru * h + 4));
+    z[0] = 0x78; z[1] = 0x01;
+    long pz = 2, re = cru * h, of = 0;
+    while (re > 0) {
+        long bl = re < 65535 ? re : 65535;
+        z[pz++] = (unsigned char)(bl >= re ? 1 : 0);
+        z[pz++] = (unsigned char)(bl & 255);
+        z[pz++] = (unsigned char)((bl >> 8) & 255);
+        z[pz++] = (unsigned char)((~bl) & 255);          // NLEN = ~LEN
+        z[pz++] = (unsigned char)(((~bl) >> 8) & 255);
+        memcpy(z + pz, crudo + of, (unsigned long)bl);
+        pz += bl; of += bl; re -= bl;
+    }
+    unsigned int ad = adlerD(crudo, cru * h);
+    z[pz++] = (unsigned char)((ad >> 24) & 255);
+    z[pz++] = (unsigned char)((ad >> 16) & 255);
+    z[pz++] = (unsigned char)((ad >> 8) & 255);
+    z[pz++] = (unsigned char)(ad & 255);
+    grChunk(f, "IDAT", z, pz);
+    xMe((void*)z);
+    xMe((void*)crudo);
+    grChunk(f, "IEND", 0, 0);
+    fclose(f);
+    return 1;
+}
+static void docRec(FILE* f, Ser* t, long prof) {     // el arbol como documento
+    if (!t) return;
+    for (long i = 0; i < prof; i++) fprintf(f, "  ");
+    fprintf(f, "%c '%s' [%ld x %ld] en (%ld, %ld) val %ld\n", t->tc,
+            t->lb ? t->lb : "", ccG(t, CI_W) / QZ, ccG(t, CI_H) / QZ,
+            ccG(t, CI_X) / QZ, ccG(t, CI_Y) / QZ, ccG(t, CI_VAL));
+    for (long m = 0; m < t->nM; m++) {               // cada fila SM al pie
+        if (!t->M[m] || !t->TM[m] || t->TM[m][0] != 'f') continue;
+        double* r6 = (double*)t->M[m];
+        for (long i = 0; i <= prof; i++) fprintf(f, "  ");
+        fprintf(f, "fila: cond %g ci %g cmp %g op %g dst %g arg %g\n",
+                r6[0], r6[1], r6[2], r6[3], r6[4], r6[5]);
+    }
+    for (long i = 0; i < t->nA; i++) docRec(f, t->A[i], prof + 1);
+}
+static long docEscena(const char* nom) {
+    FILE* f = fopenD(nom, "wb");
+    if (!f) return 0;
+    fprintf(f, "Documento de escena - Ser\n");
+    fprintf(f, "tic %ld\n", gTic);
+    docRec(f, gRoot, 0);
+    fclose(f);
+    return 1;
+}
 
 // ---- [E] escritor unico: ejecuta la cola ------------------------------------
 static void escritor() {
@@ -1796,6 +1958,10 @@ static void escritor() {
                 }
                 fclose(f);
             }
+        } else if (o->k == 11) {                  // exportar lo pintado: PNG
+            pngGraba("ser_exp.png", gImg, gW, gH);
+        } else if (o->k == 12) {                  // documento de escena legible
+            docEscena("ser_doc.txt");
         }
         oTail = oTail + 1;
     }
@@ -2080,6 +2246,8 @@ static __attribute__((unused)) void pisaRaton(float mx, float my) {
                                ? (ccG(gInsp2, CI_FLG) & ~1)
                                : (ccG(gInsp2, CI_FLG) | 1));
         else if (v == 19) ordP(10, 0, 0, 0, 0, 0, 0, 0);     // menu: EXPORT
+        else if (v == 20) ordP(11, 0, 0, 0, 0, 0, 0, 0);     // menu: PNG
+        else if (v == 21) ordP(12, 0, 0, 0, 0, 0, 0, 0);     // menu: DOC
         else if (v == 18 && gMenu)                           // menu: cerrar
             ccS(gMenu, CI_FLG, 0);
         else if (v >= 11 && v <= 17 && gObj && gObj->tc != 0) {
@@ -2143,6 +2311,8 @@ static __attribute__((unused)) void tecla(char k) {
         if (k == '-') { g3Zm *= 0.87f; if (g3Zm < 0.3f) g3Zm = 0.3f; return; }
     }
     if (k == 'E') { ordP(10, 0, 0, 0, 0, 0, 0, 0); return; }  // exportar PPM
+    if (k == 'I') { ordP(11, 0, 0, 0, 0, 0, 0, 0); return; }  // exportar PNG
+    if (k == 'O') { ordP(12, 0, 0, 0, 0, 0, 0, 0); return; }  // documento de escena
     if (k == 'U') { deshacer(); return; }          // deshacer: ultimo grupo
     if (k == 'K') {                                // clon del objetivo
         if (gObj) ordP(9, gObj, 0, 0, 0, 0, 0, 0);
@@ -2352,22 +2522,23 @@ static void linkeaMeta() {               // re-vincula menu e inspector si el
 static void creaMenu() {                 // menu contextual: acciones reales
     if (gMenu || !gRoot) return;
     gMenu = serCr(gRoot, 'p', "pM2", "Menu");
-    ccS(gMenu, CI_X, (gW - 140) * QZ); ccS(gMenu, CI_Y, (gH - 160) * QZ);
-    ccS(gMenu, CI_W, 130 * QZ); ccS(gMenu, CI_H, 160 * QZ);
+    ccS(gMenu, CI_X, (gW - 140) * QZ); ccS(gMenu, CI_Y, (gH - 210) * QZ);
+    ccS(gMenu, CI_W, 130 * QZ); ccS(gMenu, CI_H, 206 * QZ);
     ccS(gMenu, CI_R, 0.12f * QZ); ccS(gMenu, CI_G, 0.14f * QZ);
     ccS(gMenu, CI_B, 0.22f * QZ);
     ccS(gMenu, CI_A, QZ); ccS(gMenu, CI_FLG, 0); ccS(gMenu, CI_RED, 8);
     ccS(gMenu, CI_ABI, 1);               // abierto: sin esto el pick no baja
 
-    static const char* NB[6] = { "FIX", "FRENTE", "CLON", "BORRAR", "FILAS",
-                                 "EXPORT" };
-    for (long i = 0; i < 6; i++) {
+    static const char* NB[8] = { "FIX", "FRENTE", "CLON", "BORRAR", "FILAS",
+                                 "EXPORT", "PNG", "DOC" };
+    for (long i = 0; i < 8; i++) {
         Ser* e = serCr(gMenu, 'e', "mE", NB[i]);
         ccS(e, CI_X, 6 * QZ); ccS(e, CI_Y, (20 + i * 23) * QZ);
         ccS(e, CI_W, 118 * QZ); ccS(e, CI_H, 19 * QZ);
         ccS(e, CI_R, 0.2f * QZ); ccS(e, CI_G, 0.4f * QZ); ccS(e, CI_B, 0.6f * QZ);
         ccS(e, CI_A, QZ); ccS(e, CI_FLG, 1 | 4); ccS(e, CI_RED, 6);
-        ccS(e, CI_VAL, (long)(i == 5 ? 19 : 6 + i));   // 19: libre (filas=11..17)
+        long vl = i <= 4 ? 6 + i : (i == 5 ? 19 : (i == 6 ? 20 : 21));
+        ccS(e, CI_VAL, vl);              // 19: PPM (filas=11..17) 20 png 21 doc
     }
 }
 static void creaFilas() {                // inspector de filas SM: editables
@@ -2605,7 +2776,7 @@ static void escModelo() {                   // escena de arranque
     ccS(gAyTxt, CI_A, QZ); ccS(gAyTxt, CI_FLG, 1);
     Ser* ay2 = serCr(pA, 'l', "yK",
         "FLEC:camara  U:deshacer todo  L:etiqueta  V-P-D-E en menu derecho  "
-        "K:clonar  G:3D  DBL:fija  F/B/Z/X:orden z");
+        "K:clonar  G:3D  DBL:fija  F/B/Z/X:orden z  E/I:export PPM/PNG  O:doc");
     ccS(ay2, CI_X, 6 * QZ); ccS(ay2, CI_Y, 19 * QZ);
     ccS(ay2, CI_R, 0.9f * QZ); ccS(ay2, CI_G, 0.9f * QZ); ccS(ay2, CI_B, 0.95f * QZ);
     ccS(ay2, CI_A, QZ); ccS(ay2, CI_FLG, 1);
@@ -3409,6 +3580,88 @@ static void pruebas() {
             fclose(e2);
             removeD("ser_exp.ppm");
         }
+    }
+    {   // export PNG (I): driver propio sin librerias, estructura verificada
+        long okP = 0, okE = 0;
+        removeD("ser_exp.png");
+        tecla('I'); escritor();
+        FILE* p = fopenD("ser_exp.png", "rb");
+        if (p) {
+            unsigned char sig[8], tip[4], cr[4];
+            unsigned char big[65536];
+            long dimOk = 0, idat = 0, viu = 0, crcOk = 1, esID = 0;
+            if (fread(sig, 1, 8, p) == 8 &&
+                sig[0] == 0x89 && sig[1] == 'P' && sig[2] == 'N' &&
+                sig[3] == 'G' && sig[4] == 0x0d && sig[5] == 0x0a &&
+                sig[6] == 0x1a && sig[7] == 0x0a) {
+                for (;;) {
+                    unsigned char ln[4];
+                    long l;
+                    if (fread(ln, 1, 4, p) != 4) break;
+                    l = ((long)ln[0] << 24) | ((long)ln[1] << 16) |
+                        ((long)ln[2] << 8) | (long)ln[3];
+                    if (fread(tip, 1, 4, p) != 4) break;
+                    esID = (tip[0] == 'I' && tip[1] == 'D' &&
+                            tip[2] == 'A' && tip[3] == 'T');
+                    if (esID) idat = 1;
+                    unsigned int cc = crcIni();
+                    cc = crcUpd(cc, tip, 4);
+                    long re = l;                     // data leida al hilo (stream)
+                    long primero = 1;
+                    while (re > 0) {
+                        long bl = re < 65536 ? re : 65536;
+                        if (fread(big, 1, (size_t)bl, p) != (size_t)bl) {
+                            crcOk = 0; break;
+                        }
+                        cc = crcUpd(cc, big, bl);
+                        if (!esID && primero && tip[0] == 'I' &&
+                            tip[1] == 'H' && tip[2] == 'D' && tip[3] == 'R' &&
+                            l >= 8)
+                            dimOk = (((long)big[0] << 24) | ((long)big[1] << 16) |
+                                     ((long)big[2] << 8) | (long)big[3]) == gW &&
+                                    (((long)big[4] << 24) | ((long)big[5] << 16) |
+                                     ((long)big[6] << 8) | (long)big[7]) == gH;
+                        primero = 0; re -= bl;
+                    }
+                    if (crcOk == 0) break;
+                    if (fread(cr, 1, 4, p) != 4) { crcOk = 0; break; }
+                    cc = crcFin(cc);
+                    if ((cc >> 24) != cr[0] || ((cc >> 16) & 255) != cr[1] ||
+                        ((cc >> 8) & 255) != cr[2] || (cc & 255) != cr[3]) {
+                        crcOk = 0; break;
+                    }
+                    if (tip[0] == 'I' && tip[1] == 'E' && tip[2] == 'N' &&
+                        tip[3] == 'D') {
+                        viu = (l == 0 && cr[0] == 0xae && cr[1] == 0x42 &&
+                               cr[2] == 0x60 && cr[3] == 0x82);
+                        break;
+                    }
+                }
+            }
+            okP = dimOk && idat;
+            okE = crcOk && viu;
+            fclose(p);
+        }
+        printf("export PNG (I): %s\n", okP ? "PASA" : "FALLA");
+        printf("png estructura (crc+IEND): %s\n", okE ? "PASA" : "FALLA");
+        removeD("ser_exp.png");
+    }
+    {   // documento de escena: O -> ser_doc.txt
+        long nod = 0, fil = 0;
+        char li[256];
+        removeD("ser_doc.txt");
+        tecla('O'); escritor();
+        FILE* e4 = fopenD("ser_doc.txt", "rb");
+        if (e4) {
+            while (fgets(li, sizeof(li), e4)) {
+                if (strstr(li, " val ")) nod++;
+                if (strstr(li, "fila: ")) fil++;
+            }
+            fclose(e4);
+        }
+        printf("documento de escena (nodos %ld filas %ld): %s\n", nod, fil,
+               (nod > 3 && fil > 0) ? "PASA" : "FALLA");
+        removeD("ser_doc.txt");
     }
     FILE* o = fopenD("ser_check.ppm", "wb");
     if (o) {
