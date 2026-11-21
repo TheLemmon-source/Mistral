@@ -230,14 +230,8 @@ La interfaz dejo de ser dibujo sin proposito:
   una imagen que otros programas pueden abrir.
 - Ayuda del pie actualizada: `V-P-D-E en menu derecho`.
 
-## Minusculas 3x5 y arcos con profundidad (3D completo)
+## Arcos al fol con profundidad (3D)
 
-- **Minusculas propias en la fuente 3x5**: antes el glifo de una
-  minuscula era la mayuscula (`'a'` dibujaba `A`): todo texto se veia
-  gritado. Ahora `fGly` tiene 26 glifos minusculos con x-height chico
-  (3 filas) y la misma base que las mayusculas: `Colador`, `Rojo`,
-  `efectos anti/imp/urg` se leen en case real. Labels nuevos ya se
-  escriben en case natural sin trabajo extra.
 - **Arcos al fol con profundidad en 3D**: los arcos logicos (filas SM
   con `dst -1-k` = canal `k` del padre) ahora se ven en el modo 3D:
   `pinta3D` dibuja un cable azul del centro proyectado del nodo al
@@ -266,7 +260,14 @@ condiciones + asignacion, cero constantes de layout quemadas.
   espaciados distintos; los pares no declarados usan 0.
 - **Faltante al nativo de socorro**: si un byte no tiene glifo en la fuente
   del contexto, cae al 5x3 fijo (`fGly`) que nunca puede fallar. Sin fuente
-  cargada, todo el texto sale por el nativo.
+  cargada, todo el texto sale por el nativo. El nativo es **sistema de fuga
+  basico, a proposito**: mayusculas, digitos y simbolos elementales. Sin
+  minusculas (caen a su mayuscula), sin acentos ni ene: es lo minimo vital
+  para referencias cuando no se puede acceder a fuentes previstas. Las
+  simbologias avanzadas — case real, acentos, estilos — viven en las
+  fuentes de datos, extendibles a 6x10 o 10x50 segun demanda, sin tocar
+  el escape. Para ver texto case-real en la GUI alcanza con poblar
+  `fuente-ui.txt`; el sistema lo recarga al arrancar.
 - **Persistencia por contexto**: al salir, cada fuente con cambios se guarda
   a disco (`fuente-ui.txt`, `fuente-3d.txt`); al arrancar se recargan y
   invalidan los caches. Agregar o quitar glifos en vivo (`fuentePone`/

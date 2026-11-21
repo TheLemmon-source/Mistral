@@ -512,24 +512,14 @@ static bool pisaHermano(Ser* s) {
     return false;
 }
 // ---- [L] tipografia 3x5 ------------------------------------------------------
-static const char* fGly(char c) {
-    switch (c) {                         // minusculas propias: x-height chico,
-    case 'a': return "00353";            // misma base que las mayusculas (fila 4)
-    case 'b': return "04656"; case 'c': return "00343";
-    case 'd': return "01353"; case 'e': return "00673";
-    case 'f': return "34744"; case 'g': return "00653";
-    case 'h': return "04655"; case 'i': return "20222";
-    case 'j': return "10116"; case 'k': return "04565";
-    case 'l': return "44444"; case 'm': return "00755";
-    case 'n': return "00655"; case 'o': return "00252";
-    case 'p': return "04654"; case 'q': return "05553";
-    case 'r': return "00644"; case 's': return "00363";
-    case 't': return "07222"; case 'u': return "05557";
-    case 'v': return "00552"; case 'w': return "00575";
-    case 'x': return "00525"; case 'y': return "00521";
-    case 'z': return "00727";
-    }
-    switch (c >= 'a' && c <= 'z' ? (char)(c - 32) : c) {   // mayusculas y resto
+static const char* fGly(char c) {     // sistema de FUGA: minimo vital para
+    switch (c >= 'a' && c <= 'z' ? (char)(c - 32) : c) {   // referencias cuando
+                                           // no hay fuente prevista. Basico:
+                                           // mayusculas, digitos, simbolos.
+                                           // Sin minusculas ni acentos ni ene:
+                                           // el case real va por fuentes de
+                                           // datos (Glifo/Fuente), extendibles
+                                           // a 6x10 o 10x50 segun demanda.
     case 'A': return "25755"; case 'B': return "65656"; case 'C': return "34443";
     case 'D': return "65556"; case 'E': return "74647"; case 'F': return "74644";
     case 'G': return "34553"; case 'H': return "55755"; case 'I': return "72227";
@@ -3237,12 +3227,13 @@ static void pruebas() {
             }
         gLinN = 0; listaRec(gRoot);
     }
-    {                                    // tipografia 3x5: minusculas propias
-        int dif = strcmp(fGly('n'), fGly('N')) != 0
-               && strcmp(fGly('a'), fGly('A')) != 0
-               && strcmp(fGly('o'), fGly('O')) != 0
-               && strcmp(fGly('s'), fGly('S')) != 0;
-        printf("minusculas 3x5 distintas: %s\n", dif ? "PASA" : "FALLA");
+    {                                    // tipografia 3x5: fuga basica
+        int dif = strcmp(fGly('n'), fGly('N')) == 0
+               && strcmp(fGly('a'), fGly('A')) == 0
+               && strcmp(fGly('o'), fGly('O')) == 0
+               && strcmp(fGly('s'), fGly('S')) == 0;
+        printf("fuga 3x5 basica (n==N, sin minusculas propias): %s\n",
+               dif ? "PASA" : "FALLA");
         long fs0 = gFS;
         static unsigned int bk2[14 * 20];
         for (long j = 0; j < 14; j++)
@@ -3257,7 +3248,7 @@ static void pruebas() {
         for (long j = 0; j < 14; j++)
             for (long i2 = 0; i2 < 20; i2++)
                 if (gImg[(long)(430 + j) * gW + 300 + i2]) nb++;
-        printf("minusculas se pintan: %s (%ld px)\n",
+        printf("fuga pinta minuscula como mayuscula: %s (%ld px)\n",
                nb > 10 ? "PASA" : "FALLA", nb);
         for (long j = 0; j < 14; j++)
             for (long i2 = 0; i2 < 20; i2++)
