@@ -139,6 +139,8 @@ static long removeD(const char* nom) {
 #define CI_POE 15                      // [R] pool: epoch = liberaciones de slots confirmados
 #define CI_POS 16                      // [R] pool: proximo slot a escanear (rotacion)
 #define CI_TOP 17                      // [R] pool: C[CI_TOP+i] es el slot i
+#define CI_AGL 96                      // [P] polar: angulo en grados * QZ
+#define CI_RAD 97                      // [P] polar: radio en QZ (pulsos de 256)
 
 // ---- [S] nucleo ser ---------------------------------------------------------
 static void* xM(unsigned long nb) {
@@ -339,6 +341,27 @@ static long resVivos(Ser* s) {           // slots tomados ahora
     long n = ccG(s, CI_PON), v = 0;
     for (long i = 0; i < n; i++) if (ccG(s, CI_TOP + i)) v++;
     return v;
+}
+
+// ---- [P] polar: posicion efectiva = declarada + radio * (cos, sin) ----------
+//        CI_RAD en QZ, CI_AGL en grados * QZ (90*QZ = 90 grados). Un solo
+//        resolutor: pintar, pickear, 3D y colador preguntan ACA; radio 0
+//        = como siempre (x, y absolutos), asi nada cambia de golpe y el
+//        arrastre sigue moviendo el pivote declarado.
+static long pRed(double v) {             // redondeo con signo
+    return (long)(v + (v >= 0 ? 0.5 : -0.5));
+}
+static void posEf(Ser* s, long* ox, long* oy) {
+    long x = ccG(s, CI_X), y = ccG(s, CI_Y);
+    long rad = ccG(s, CI_RAD);
+    if (rad != 0) {
+        double a = (double)ccG(s, CI_AGL)
+                   * (2.0 * 3.14159265358979 / (360.0 * QZ));
+        x += pRed((double)rad * cos(a));
+        y += pRed((double)rad * sin(a));
+    }
+    if (ox) *ox = x;
+    if (oy) *oy = y;
 }
 
 // ---- [V] vidas: snapshots de C[] del nodo; bitacora global con tope ----------
@@ -1351,11 +1374,11 @@ static void coladorPinta(unsigned int* dst, long dw, long dh) {
         if (s->tc != 'r' && !(fl & 1)) continue;
         long w = ccG(s, CI_W), h = ccG(s, CI_H);
         if (w <= 0 || h <= 0) continue;
-        long x = ccG(s, CI_X), y = ccG(s, CI_Y);
+        long x = 0, y2 = 0; posEf(s, &x, &y2);
         if (x < bx0) bx0 = x;
-        if (y < by0) by0 = y;
+        if (y2 < by0) by0 = y2;
         if (x + w > bx1) bx1 = x + w;
-        if (y + h > by1) by1 = y + h;
+        if (y2 + h > by1) by1 = y2 + h;
     }
     __sync_lock_test_and_set(&gColNva, 1);
     if (bx1 <= bx0 || by1 <= by0) return;
@@ -1449,8 +1472,9 @@ static void pintaNodo(Ser* s, float ox, float oy) {
     if (!s) return;
     long fl = ccG(s, CI_FLG);
     if (s->tc != 'r' && !(fl & 1)) return;
-    float x = ox + (float)ccG(s, CI_X) / QZ;
-    float y = oy + (float)ccG(s, CI_Y) / QZ;
+    long ex = 0, ey = 0; posEf(s, &ex, &ey);
+    float x = ox + (float)ex / QZ;
+    float y = oy + (float)ey / QZ;
     float w = (float)ccG(s, CI_W) / QZ;
     float h = (float)ccG(s, CI_H) / QZ;
     float r = (float)ccG(s, CI_R) / (float)QZ;
@@ -1693,7 +1717,8 @@ static void pinta3D() {
     long bx0 = 1 << 30, by0 = 1 << 30, bx1 = -(1 << 30), by1 = -(1 << 30);
     for (long i = 0; i < g3N3; i++) {
         Ser* t = g3Se[i];
-        long x = ccG(t, CI_X) / QZ, y = ccG(t, CI_Y) / QZ;
+        long e3x = 0, e3y = 0; posEf(t, &e3x, &e3y);
+        long x = e3x / QZ, y = e3y / QZ;
         long w = ccG(t, CI_W) / QZ, h = ccG(t, CI_H) / QZ;
         if (x < bx0) bx0 = x;
         if (y < by0) by0 = y;
@@ -1708,9 +1733,10 @@ static void pinta3D() {
         for (long i = 0; i < g3N3; i++) {
             opos[i] = i;
             Ser* t = g3Se[i];
-            float wx = ((float)(ccG(t, CI_X) + ccG(t, CI_W) / 2))
+            long e3x = 0, e3y = 0; posEf(t, &e3x, &e3y);
+            float wx = ((float)(e3x + ccG(t, CI_W) / 2))
                        / QZ / 30.0f - ccx;
-            float wy = ((float)(ccG(t, CI_Y) + ccG(t, CI_H) / 2))
+            float wy = ((float)(e3y + ccG(t, CI_H) / 2))
                        / QZ / 30.0f - ccy;
             float qz = 0, sx = 0, sy = 0;
             pr3(wx, wy, -1.1f * (float)g3Nv[i], &sx, &sy, &qz);
@@ -1848,8 +1874,9 @@ static long long* cachePinta(Ser* c, long pintar) { // cache con pintura fresca
     unsigned int* tg0 = gTgt;
     long tw0 = gTW, th0 = gTH;
     gTgt = sub; gTW = (long)c4[1]; gTH = (long)c4[2];
-    pintaNodo(c, 3 - (float)(ccG(c, CI_X)) / QZ,   // pintado local al cache
-                 3 - (float)(ccG(c, CI_Y)) / QZ);
+    long px2 = 0, py2 = 0; posEf(c, &px2, &py2);
+    pintaNodo(c, 3 - (float)px2 / QZ,      // pintado local al cache
+                 3 - (float)py2 / QZ);
     c4[3] = gv;
     gTgt = tg0; gTW = tw0; gTH = th0;
     return c4;
@@ -1869,8 +1896,9 @@ static void pintaTodo() {
             if (!c || (((ccG(c, CI_FLG) & 8) != 0) != (pase == 1))) continue;
             long vis = ccG(c, CI_FLG) & 1;
             long pin = ccG(c, CI_FLG) & 8;
-            int ax = (int)(ccG(c, CI_X) - (pin ? 0 : gCamX) - 3 * QZ) / QZ;
-            int ay = (int)(ccG(c, CI_Y) - (pin ? 0 : gCamY) - 3 * QZ) / QZ;
+            long ex = 0, ey = 0; posEf(c, &ex, &ey);
+            int ax = (int)(ex - (pin ? 0 : gCamX) - 3 * QZ) / QZ;
+            int ay = (int)(ey - (pin ? 0 : gCamY) - 3 * QZ) / QZ;
             limpia(ax, ay, extW(c), extH(c));     // zona -> fondo
             if (!vis) continue;
             long long* c4 = cachePinta(c, 1);     // fresco: repinta si cambio
@@ -1890,8 +1918,9 @@ static Ser* eligeZ(Ser* s, float mx, float my) {  // mx,my: coords del fol de s
     if (s->tc != 'r' && !(fl & 1)) return 0;
     float x = 0, y = 0, w = 0, h = 0;
     if (s->tc != 'r') {
-        x = (float)ccG(s, CI_X) / QZ;
-        y = (float)ccG(s, CI_Y) / QZ;
+        long ex = 0, ey = 0; posEf(s, &ex, &ey);
+        x = (float)ex / QZ;
+        y = (float)ey / QZ;
         w = (float)ccG(s, CI_W) / QZ;
         h = (float)ccG(s, CI_H) / QZ;
     }
@@ -2048,9 +2077,13 @@ static long pngGraba(const char* nom, unsigned int* im, long w, long h) {
 static void docRec(FILE* f, Ser* t, long prof) {     // el arbol como documento
     if (!t) return;
     for (long i = 0; i < prof; i++) fprintf(f, "  ");
+    long px2 = 0, py2 = 0; posEf(t, &px2, &py2);
     fprintf(f, "%c '%s' [%ld x %ld] en (%ld, %ld) val %ld\n", t->tc,
             t->lb ? t->lb : "", ccG(t, CI_W) / QZ, ccG(t, CI_H) / QZ,
-            ccG(t, CI_X) / QZ, ccG(t, CI_Y) / QZ, ccG(t, CI_VAL));
+            px2 / QZ, py2 / QZ, ccG(t, CI_VAL));
+    if (ccG(t, CI_RAD) != 0)
+        fprintf(f, "  polar: radio %ld grados %ld\n",
+                ccG(t, CI_RAD) / QZ, ccG(t, CI_AGL) / QZ);
     for (long m = 0; m < t->nM; m++) {               // cada fila SM al pie
         if (!t->M[m] || !t->TM[m] || t->TM[m][0] != 'f') continue;
         double* r6 = (double*)t->M[m];
@@ -4177,6 +4210,64 @@ static void pruebas() {
         okD = okD && gVidN == 0;              // los muertos salen de la bitacora
         printf("deshacer global de vidas (bitacora tope %ld): %s\n",
                (long)VID_N, okD ? "PASA" : "FALLA");
+        gRoot = rv;
+    }
+    {   // polar: posicion efectiva = declarada + radio * (cos, sin)
+        Ser* rv = gRoot; gRoot = 0;
+        Ser* p = serCr(0, 'b', "Pl", "Polar");
+        ccS(p, CI_X, 100 * QZ); ccS(p, CI_Y, 50 * QZ);
+        int okP = 1; long ex = -1, ey = -1;
+        posEf(p, &ex, &ey);
+        okP = (ex == 100 * QZ && ey == 50 * QZ);   // radios 0: como siempre
+        ccS(p, CI_RAD, 30 * QZ);
+        posEf(p, &ex, &ey);
+        okP = okP && ex == 130 * QZ && ey == 50 * QZ;   // 0 grados: a la derecha
+        ccS(p, CI_AGL, 90 * QZ);
+        posEf(p, &ex, &ey);
+        okP = okP && ex == 100 * QZ && ey == 80 * QZ;   // 90 grados: abajo
+        ccS(p, CI_RAD, 0);                              // radio 0: vuelve limpio
+        posEf(p, &ex, &ey);
+        okP = okP && ex == 100 * QZ && ey == 50 * QZ;
+        FILE* df = fopenD("ser_doc2.txt", "w");        // doc: lista el polar
+        int hadP = 0, hadP2 = 0;
+        if (df) { docRec(df, p, 0); fclose(df);
+            df = fopenD("ser_doc2.txt", "r");
+            if (df) { char li[256];
+                while (fgets(li, sizeof(li), df))
+                    if (strstr(li, "polar: radio")) hadP++;
+                fclose(df); }
+            removeD("ser_doc2.txt"); }
+        okP = okP && hadP == 0;
+        ccS(p, CI_RAD, 30 * QZ);
+        df = fopenD("ser_doc2.txt", "w");
+        if (df) { docRec(df, p, 0); fclose(df);
+            df = fopenD("ser_doc2.txt", "r");
+            if (df) { char li[256];
+                while (fgets(li, sizeof(li), df))
+                    if (strstr(li, "polar: radio 30")) hadP2++;
+                fclose(df); }
+            removeD("ser_doc2.txt"); }
+        okP = okP && hadP2 == 1;
+        printf("polar (posicion efectiva rad/agl + doc): %s\n",
+               okP ? "PASA" : "FALLA");
+        serAl(p);
+        gRoot = rv;
+    }
+    {   // espiral con filas SM: angulo y radio crecen, la posicion gira
+        Ser* rv = gRoot; gRoot = 0;
+        Ser* p = serCr(0, 'b', "Pl", "Espira");
+        ccS(p, CI_X, 0); ccS(p, CI_Y, 0); ccS(p, CI_AGL, 0); ccS(p, CI_RAD, 0);
+        f6Add(p, 0, 0, 0, 1, CI_AGL, 45 * QZ);   // agl += 45 grados
+        f6Add(p, 0, 0, 0, 1, CI_RAD, 10 * QZ);   // rad += 10
+        exRows(p);
+        int okS = (ccG(p, CI_AGL) == 45 * QZ && ccG(p, CI_RAD) == 10 * QZ);
+        exRows(p); exRows(p); exRows(p);         // 4 pasadas: 180 grados, 40
+        okS = okS && ccG(p, CI_AGL) == 180 * QZ && ccG(p, CI_RAD) == 40 * QZ;
+        long ex2 = -1, ey2 = -1; posEf(p, &ex2, &ey2);
+        okS = okS && ex2 == -40 * QZ && ey2 == 0;   // 180 grados: a la izquierda
+        printf("espiral con filas SM (agl/rad crecen): %s\n",
+               okS ? "PASA" : "FALLA");
+        serAl(p);
         gRoot = rv;
     }
     FILE* o = fopenD("ser_check.ppm", "wb");

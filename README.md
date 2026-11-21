@@ -376,6 +376,24 @@ viejo sale). Nada de copiar estructuras: una vida son numeros.
 - Los nodos reciclados del pool conservan su historial? No: `serAl`
   libera las matrices `vd` con el resto; cada vida muere con su nodo.
 
+## Polar: posicion efectiva unificada
+
+La base para la espiral y los semi-arcos, sin volver a tocar nada
+arriba: dos canales, `CI_AGL` (angulo en grados * QZ) y `CI_RAD`
+(radio en QZ), y **un solo resolutor** `posEf()` que pregunta todo: el
+pintor, el pickeo, el 3D (bbox y proyeccion) y el colador. La posicion
+efectivo = declarada + radio * (cos, sin) en grados * QZ:
+
+- Radio 0 = exactamente como siempre (x, y absolutos); nada cambia de
+  golpe y el arrastre sigue moviendo el pivote declarado.
+- Espiral = filas SM que avanzan `CI_AGL` (359*QZ = vuelta entera) y
+  crecen `CI_RAD`; el mismo nodo orbita y sale en espiral en 2D y en 3D
+  por el mismo camino.
+- Los canales viven arriba de los del pool (96/97) y solo se
+  materializan al pedirlos (`ccG`/`ccS` crecen `C[]` a demanda).
+- El doc de escena imprime la posicion efectiva y anota
+  `polar: radio R grados G` en cada nodo con radio activo.
+
 ## Compilar
 
 Con GCC (MinGW64 en Windows):
@@ -388,7 +406,7 @@ En Dev-C++ (Proyecto Win32 GUI, C++11) o Makefile.win → target `Ser.o` +
 enlazado con `-luser32 -lgdi32`. Con ventana abre un editor de controles:
 botones, checks, sliders, redondeados, caches, sesiones anidadas.
 
-Sin modificar nada, `main()` corre primero la batería de pruebas (107/107 PASA,
+Sin modificar nada, `main()` corre primero la batería de pruebas (109/109 PASA,
 sin ventana) y escribe `ser_check.ppm` 800x520 como render de verificación.
 
 ## Formato
