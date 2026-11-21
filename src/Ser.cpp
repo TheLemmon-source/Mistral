@@ -758,6 +758,7 @@ static void camFuente() {               // el par proyecta el cubo 3D
 // ---- [C] colador: tercer proceso, escena -> imagen con pesos volatiles -------
 static volatile long gColAnti = 400, gColImp = 300, gColUrg = 300;   // pesos 0..1000
 static Ser* gColNodo = 0;               // camara 'm' que muestra lo colado
+static Ser* gColPnl = 0;                // panel con los sliders de los pesos
 static volatile long gColNva = 0;       // embudo: colado nuevo
 static unsigned int gBufCol[64 * 48];   // imagen colada (fit del bbox del mundo)
 static void colador() {
@@ -839,8 +840,9 @@ static void parParar() { gParar = 1; pthread_join(gHiloVig, 0); }
 #endif
 
 // ---- [P] pintado del arbol (colado por orden A[], cache por gen) ------------
-static Ser* gLin[1024];    // lista colada pintador (mismo orden sirve al pick)
-static long gLinN = 0;
+static Ser** gLin = 0;     // lista colada pintador (mismo orden sirve al pick):
+static long gLinN = 0;     // dinamica: crece al doble, nunca se recorta
+static long gLinC = 0;
 
 static void pintaNodo(Ser* s, float ox, float oy) {
     if (!s) return;
@@ -927,8 +929,14 @@ static void listaRec(Ser* s) {           // lista colada: pintador y pick
         return;
     }
     if (!(ccG(s, CI_FLG) & 1)) return;
-    if (gLinN < 1024) gLin[gLinN++] = s;
-    else fprintf(stderr, "ser: colado de 1024 alcanzado: nodo sin pick\n");
+    if (gLinN >= gLinC) {                 // gLin dinamico: doble y copia
+        long nc = gLinC ? gLinC * 2 : 1024;
+        Ser** nl = (Ser**)xM((unsigned long)nc * sizeof(Ser*));
+        for (long i = 0; i < gLinN; i++) nl[i] = gLin[i];
+        xMe((void*)gLin);
+        gLin = nl; gLinC = nc;
+    }
+    gLin[gLinN++] = s;
     if (s->tc != 'p' || (ccG(s, CI_ABI) & 1))
         for (long pase = 0; pase < 2; pase++)   // pin CI_FLG&8 al final
             for (long i = 0; i < s->nA; i++) {
@@ -1401,6 +1409,19 @@ static void escritor() {
                     syncInsp();
                 }
             }
+        } else if (o->k == 10) {                  // exportar lo pintado: PPM
+            FILE* f = fopen("ser_exp.ppm", "wb");
+            if (f) {
+                fprintf(f, "P6\n%ld %ld\n255\n", gW, gH);
+                for (long i = 0; i < gW * gH; i++) {
+                    unsigned char r4 = (unsigned char)((gImg[i] >> 16) & 255);
+                    unsigned char g4 = (unsigned char)((gImg[i] >> 8) & 255);
+                    unsigned char b4 = (unsigned char)(gImg[i] & 255);
+                    fwrite(&r4, 1, 1, f); fwrite(&g4, 1, 1, f);
+                    fwrite(&b4, 1, 1, f);
+                }
+                fclose(f);
+            }
         }
         oTail = oTail + 1;
     }
@@ -1413,11 +1434,11 @@ static long esDe(Ser* ap, Ser* t) {      // ap vive dentro de la rama t
     return 0;
 }
 static void borraApuntados(Ser* t) {     // ser colgado en la rama borrada
-    Ser** ap[19] = { &gObj, &gSel, &gAnt, &gInsp, &gSes, &gForm, &gCamNodo,
-                     &gColNodo, &gInspEd, &gInspVis, &gInspPn, &gInspR,
+    Ser** ap[20] = { &gObj, &gSel, &gAnt, &gInsp, &gSes, &gForm, &gCamNodo,
+                     &gColNodo, &gColPnl, &gInspEd, &gInspVis, &gInspPn, &gInspR,
                      &gInspG, &gInspB, &gInspRad, &gAyTxt,
                      &gMenu, &gInsp2, &gFilTxt };
-    for (long i = 0; i < 19; i++) if (esDe(*ap[i], t)) *ap[i] = 0;
+    for (long i = 0; i < 20; i++) if (esDe(*ap[i], t)) *ap[i] = 0;
     gFilLast = 0;                        // el foco nuevo reordena fila 0
     if (!gObj) gEdito = 0;
 }
@@ -1465,9 +1486,17 @@ static Ser* clonaHasta(Ser* t, Ser* fol, long nivel) {   // copia profunda
 static Ser* clonaSer(Ser* t, Ser* fol) { return clonaHasta(t, fol, 0); }
 
 static void inspAplica(Ser* sl) {        // slider ligado -> objetivo elegido
-    if (!gObj || !sl) return;            // cualquier slider con CI_EXT actua igual
+    if (!sl) return;                     // cualquier slider con CI_EXT actua igual
     long ch = ccG(sl, CI_EXT);
     long vr = ccG(sl, CI_VAL);
+    if (ch == 100 || ch == 101 || ch == 102) {   // pesos del colador
+        if (ch == 100) gColAnti = vr;
+        else if (ch == 101) gColImp = vr;
+        else gColUrg = vr;
+        colador();                       // nueva mirada: se ve al toque
+        return;
+    }
+    if (!gObj) return;
     if (ch == CI_RED) {
         lgE(gObj, CI_RED, ccG(gObj, CI_RED), 0);
         ccS(gObj, CI_RED, vr * 30 / 1000);
@@ -1676,6 +1705,7 @@ static __attribute__((unused)) void pisaRaton(float mx, float my) {
             ccS(gInsp2, CI_FLG, (ccG(gInsp2, CI_FLG) & 1)
                                ? (ccG(gInsp2, CI_FLG) & ~1)
                                : (ccG(gInsp2, CI_FLG) | 1));
+        else if (v == 19) ordP(10, 0, 0, 0, 0, 0, 0, 0);     // menu: EXPORT
         else if (v == 18 && gMenu)                           // menu: cerrar
             ccS(gMenu, CI_FLG, 0);
         else if (v >= 11 && v <= 17 && gObj && gObj->tc != 0) {
@@ -1738,6 +1768,7 @@ static __attribute__((unused)) void tecla(char k) {
         if (k == '+') { g3Zm *= 1.15f; if (g3Zm > 3.0f) g3Zm = 3.0f; return; }
         if (k == '-') { g3Zm *= 0.87f; if (g3Zm < 0.3f) g3Zm = 0.3f; return; }
     }
+    if (k == 'E') { ordP(10, 0, 0, 0, 0, 0, 0, 0); return; }  // exportar PPM
     if (k == 'U') { deshacer(); return; }          // deshacer: ultimo grupo
     if (k == 'K') {                                // clon del objetivo
         if (gObj) ordP(9, gObj, 0, 0, 0, 0, 0, 0);
@@ -1890,6 +1921,31 @@ static void desEscenaRoot() {
     ccS(gRoot, CI_H, gH * QZ);
     ccS(gRoot, CI_FLG, 0);
 }
+static void creaColador() {              // sliders de los pesos del colador
+    if (gColPnl || !gRoot) return;
+    gColPnl = serCr(gRoot, 'p', "pCo", "Colador");
+    ccS(gColPnl, CI_X, 640 * QZ); ccS(gColPnl, CI_Y, 262 * QZ);
+    ccS(gColPnl, CI_W, 150 * QZ); ccS(gColPnl, CI_H, 104 * QZ);
+    ccS(gColPnl, CI_R, 0.1f * QZ); ccS(gColPnl, CI_G, 0.12f * QZ);
+    ccS(gColPnl, CI_B, 0.16f * QZ);
+    ccS(gColPnl, CI_A, QZ); ccS(gColPnl, CI_FLG, 1); ccS(gColPnl, CI_ABI, 1);
+    ccS(gColPnl, CI_RED, 8);
+    static const char* NB[3] = { "ANTI", "IMP", "URG" };
+    long vivos[3] = { (long)gColAnti, (long)gColImp, (long)gColUrg };
+    for (long i = 0; i < 3; i++) {
+        Ser* s2 = serCr(gColPnl, 's', "wC", NB[i]);
+        ccS(s2, CI_X, 6 * QZ); ccS(s2, CI_Y, (20 + i * 24) * QZ);
+        ccS(s2, CI_W, 138 * QZ); ccS(s2, CI_H, 16 * QZ);
+        ccS(s2, CI_R, 0.2f * QZ); ccS(s2, CI_G, 0.7f * QZ); ccS(s2, CI_B, 0.5f * QZ);
+        ccS(s2, CI_A, QZ); ccS(s2, CI_FLG, 1 | 4); ccS(s2, CI_RED, 6);
+        ccS(s2, CI_EXT, (long)(100 + i));
+        ccS(s2, CI_VAL, vivos[i]);       // el slider nace con el peso real
+    }
+    Ser* h3 = serCr(gColPnl, 'l', "wH", "efectos anti/imp/urg");
+    ccS(h3, CI_X, 6 * QZ); ccS(h3, CI_Y, 90 * QZ);
+    ccS(h3, CI_R, 0.8f * QZ); ccS(h3, CI_G, 0.8f * QZ); ccS(h3, CI_B, 0.8f * QZ);
+    ccS(h3, CI_A, QZ); ccS(h3, CI_FLG, 1);
+}
 static Ser* esteMeta(const char* lb) {   // panel de esquema que volvio del archivo
     if (!gRoot) return 0;
     for (long i = 0; i < gRoot->nA; i++) {
@@ -1901,6 +1957,8 @@ static Ser* esteMeta(const char* lb) {   // panel de esquema que volvio del arch
 static void linkeaMeta() {               // re-vincula menu e inspector si el
     Ser* m = esteMeta("Menu");           // archivo DEL QUE VENIMOS ya los tenia:
     if (m) gMenu = m;                    // sin esto quedan duplicados al cargar
+    Ser* pc = esteMeta("Colador");
+    if (pc) gColPnl = pc;
     Ser* r = esteMeta("Filas SM");
     if (r) {
         gInsp2 = r;
@@ -1921,20 +1979,21 @@ static void creaMenu() {                 // menu contextual: acciones reales
     if (gMenu || !gRoot) return;
     gMenu = serCr(gRoot, 'p', "pM2", "Menu");
     ccS(gMenu, CI_X, (gW - 140) * QZ); ccS(gMenu, CI_Y, (gH - 160) * QZ);
-    ccS(gMenu, CI_W, 130 * QZ); ccS(gMenu, CI_H, 134 * QZ);
+    ccS(gMenu, CI_W, 130 * QZ); ccS(gMenu, CI_H, 160 * QZ);
     ccS(gMenu, CI_R, 0.12f * QZ); ccS(gMenu, CI_G, 0.14f * QZ);
     ccS(gMenu, CI_B, 0.22f * QZ);
     ccS(gMenu, CI_A, QZ); ccS(gMenu, CI_FLG, 0); ccS(gMenu, CI_RED, 8);
     ccS(gMenu, CI_ABI, 1);               // abierto: sin esto el pick no baja
 
-    static const char* NB[5] = { "FIX", "FRENTE", "CLON", "BORRAR", "FILAS" };
-    for (long i = 0; i < 5; i++) {
+    static const char* NB[6] = { "FIX", "FRENTE", "CLON", "BORRAR", "FILAS",
+                                 "EXPORT" };
+    for (long i = 0; i < 6; i++) {
         Ser* e = serCr(gMenu, 'e', "mE", NB[i]);
         ccS(e, CI_X, 6 * QZ); ccS(e, CI_Y, (20 + i * 23) * QZ);
         ccS(e, CI_W, 118 * QZ); ccS(e, CI_H, 19 * QZ);
         ccS(e, CI_R, 0.2f * QZ); ccS(e, CI_G, 0.4f * QZ); ccS(e, CI_B, 0.6f * QZ);
         ccS(e, CI_A, QZ); ccS(e, CI_FLG, 1 | 4); ccS(e, CI_RED, 6);
-        ccS(e, CI_VAL, (long)(6 + i));
+        ccS(e, CI_VAL, (long)(i == 5 ? 19 : 6 + i));   // 19: libre (filas=11..17)
     }
 }
 static void creaFilas() {                // inspector de filas SM: editables
@@ -2171,13 +2230,14 @@ static void escModelo() {                   // escena de arranque
     ccS(gAyTxt, CI_R, QZ); ccS(gAyTxt, CI_G, 0.75f * QZ); ccS(gAyTxt, CI_B, 0.15f * QZ);
     ccS(gAyTxt, CI_A, QZ); ccS(gAyTxt, CI_FLG, 1);
     Ser* ay2 = serCr(pA, 'l', "yK",
-        "FLEC:camara  U:deshacer todo  L:etiqueta  V-P-D en menu derecho  "
+        "FLEC:camara  U:deshacer todo  L:etiqueta  V-P-D-E en menu derecho  "
         "K:clonar  G:3D  DBL:fija  F/B/Z/X:orden z");
     ccS(ay2, CI_X, 6 * QZ); ccS(ay2, CI_Y, 19 * QZ);
     ccS(ay2, CI_R, 0.9f * QZ); ccS(ay2, CI_G, 0.9f * QZ); ccS(ay2, CI_B, 0.95f * QZ);
     ccS(ay2, CI_A, QZ); ccS(ay2, CI_FLG, 1);
     creaMenu();
     creaFilas();
+    creaColador();
 }
 
 // ---- [T] pruebas (sin ventana) ------------------------------------------------
@@ -2592,7 +2652,7 @@ static void pruebas() {
             serAl(h);
         }
         serAl(gRoot); gRoot = 0;
-        gSes = 0; gForm = 0; gCamNodo = 0; gColNodo = 0; gSel = 0; gAnt = 0; gArra = 0;
+        gSes = 0; gForm = 0; gCamNodo = 0; gColNodo = 0; gColPnl = 0; gSel = 0; gAnt = 0; gArra = 0;
         gInsp = 0; gInspEd = 0; gInspVis = 0; gInspPn = 0;
         gInspR = 0; gInspG = 0; gInspB = 0; gInspRad = 0;
         gAyTxt = 0; gObj = 0;                        // sin nodos fantasma al recargar
@@ -2626,7 +2686,7 @@ static void pruebas() {
         serAl(h);
     }
     serAl(gRoot); gRoot = 0;
-    gSes = 0; gForm = 0; gCamNodo = 0; gColNodo = 0; gSel = 0; gAnt = 0; gArra = 0;
+    gSes = 0; gForm = 0; gCamNodo = 0; gColNodo = 0; gColPnl = 0; gSel = 0; gAnt = 0; gArra = 0;
     gInsp = 0; gInspEd = 0; gInspVis = 0; gInspPn = 0;
     gInspR = 0; gInspG = 0; gInspB = 0; gInspRad = 0;
     gAyTxt = 0; gObj = 0;
@@ -2655,7 +2715,7 @@ static void pruebas() {
             serAl(h);
         }
         serAl(gRoot); gRoot = 0;
-        gSes = 0; gForm = 0; gCamNodo = 0; gColNodo = 0; gSel = 0; gAnt = 0; gArra = 0;
+        gSes = 0; gForm = 0; gCamNodo = 0; gColNodo = 0; gColPnl = 0; gSel = 0; gAnt = 0; gArra = 0;
         gInsp = 0; gInspEd = 0; gInspVis = 0; gInspPn = 0;
         gInspR = 0; gInspG = 0; gInspB = 0; gInspRad = 0;
         gAyTxt = 0; gObj = 0;
@@ -2675,7 +2735,7 @@ static void pruebas() {
             serAl(h);
         }
         serAl(gRoot); gRoot = 0;
-        gSes = 0; gForm = 0; gCamNodo = 0; gColNodo = 0;
+        gSes = 0; gForm = 0; gCamNodo = 0; gColNodo = 0; gColPnl = 0;
         gInsp = 0; gInspEd = 0; gInspVis = 0; gInspPn = 0;
         gInspR = 0; gInspG = 0; gInspB = 0; gInspRad = 0;
         gAyTxt = 0; gObj = 0; gSel = 0; gAnt = 0; gArra = 0; gEdito = 0;
@@ -2813,6 +2873,63 @@ static void pruebas() {
         creaMenu(); creaFilas();         // sin rastro en el archivo: se crean
         printf("creaMenu/creaFilas reaciden: %s\n",
                (gMenu && gInsp2 && gFilTxt && gRoot->nA == na0 + 2) ? "PASA" : "FALLA");
+    }
+    {                                    // sliders del colador: pesos al toque
+        Ser* sA = gColPnl && gColPnl->nA > 0 ? gColPnl->A[0] : 0;
+        long okS = sA && sA->tc == 's' && ccG(sA, CI_EXT) == 100;
+        printf("colador 3 sliders: %s\n",
+               (okS && gColPnl->nA > 1 && ccG(gColPnl->A[1], CI_EXT) == 101 &&
+                gColPnl->nA > 2 && ccG(gColPnl->A[2], CI_EXT) == 102) ? "PASA" : "FALLA");
+        printf("colador slider nace con peso: %s (VAL %ld)\n",
+               (okS && ccG(sA, CI_VAL) == 400) ? "PASA" : "FALLA",
+               okS ? ccG(sA, CI_VAL) : -1);
+        if (okS) {
+            ccS(sA, CI_VAL, 900);
+            inspAplica(sA);              // aplica y colada de nuevo al toque
+            printf("peso ANTI por slider: %s (anti=%ld)\n",
+                   (long)gColAnti == 900 ? "PASA" : "FALLA", (long)gColAnti);
+            long nz = 0;
+            for (long i = 0; i < 64 * 48; i++) if (gBufCol[i]) nz++;
+            printf("colador recolada al toque: %s (pix %ld)\n",
+                   nz > 0 ? "PASA" : "FALLA", nz);
+            ccS(sA, CI_VAL, 400);
+            inspAplica(sA);              // restaurar: no ensucie otros tests
+            printf("peso ANTI restaurado: %s\n",
+                   (long)gColAnti == 400 ? "PASA" : "FALLA");
+        }
+    }
+    {                                    // gLin dinamico: crece al doble
+        Ser* pS2 = serCr(gRoot, 'p', "pS2", "Stress");
+        ccS(pS2, CI_X, 850 * QZ); ccS(pS2, CI_Y, 10 * QZ);
+        ccS(pS2, CI_W, 60 * QZ); ccS(pS2, CI_H, 60 * QZ);
+        ccS(pS2, CI_A, QZ); ccS(pS2, CI_FLG, 1);   // fuera de pantalla: solo lista
+        ccS(pS2, CI_ABI, 1);              // abierto: listaRec baja a los 1100
+        for (long i = 0; i < 1100; i++) {
+            Ser* b2 = serCr(pS2, 'e', "sB", "s");
+            ccS(b2, CI_A, QZ); ccS(b2, CI_FLG, 1);
+        }
+        gLinN = 0; listaRec(gRoot);
+        printf("gLin dinamico: %s (N %ld, cap crecida)\n",
+               gLinN > 1024 ? "PASA" : "FALLA", gLinN);
+        for (long i = 0; i < gRoot->nA; i++)       // sacar el panel Stress: sin
+            if (gRoot->A[i] == pS2) {              // escritor, no ensucia la escena
+                for (long j = i; j < gRoot->nA - 1; j++) gRoot->A[j] = gRoot->A[j + 1];
+                gRoot->nA--; break;
+            }
+        gLinN = 0; listaRec(gRoot);
+    }
+    {                                    // export: tecla E -> ser_exp.ppm
+        remove("ser_exp.ppm");
+        tecla('E'); escritor();
+        FILE* e2 = fopen("ser_exp.ppm", "rb");
+        printf("export E: %s\n", e2 ? "PASA" : "FALLA");
+        if (e2) {
+            char mag[2] = { 0, 0 };
+            fread(mag, 1, 2, e2);
+            printf("export P6: %s",(mag[0] == 'P' && mag[1] == '6') ? " PASA\n" : " FALLA\n");
+            fclose(e2);
+            remove("ser_exp.ppm");
+        }
     }
     FILE* o = fopen("ser_check.ppm", "wb");
     if (o) {

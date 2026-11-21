@@ -106,7 +106,7 @@ pantalla -> mundo antes de bajar por zonas.
 
 La escena de arranque trae una barra **fijada** (pin) al pie: una línea
 clava los atajos (FLECHAS cámara, C origen, U deshacer, L etiqueta,
-V visible, P pin, D borrar, F/B/Z/X orden z) y una línea de estado
+V visible, P pin, D borrar, K clonar, E exporta, F/B/Z/X orden z) y una línea de estado
 se reescribe por frame con el foco real: `SEL nombre [tipo]` + marcas
 `OCULTO`/`PIN` (sin repintar si no cambia: solo sube versión al
 cambiar el texto). El nodo con foco (`gObj`) lleva **marco ámbar de
@@ -196,10 +196,10 @@ La interfaz dejo de ser dibujo sin proposito:
   original (+30, +26), lo deja seleccionado y es deshacible con `U`.
 - **Menu de boton derecho**: `WM_RBUTTONDOWN` pre-selecciona lo que
   esta bajo el cursor y abre un panel contextual (FIX/FRENTE/CLON/
-  BORRAR/FILAS) pegado al cursor (clamp a la ventana). FIX hace pin,
-  FRENTE es op 3, CLON es op 9, BORRAR es op 2, FILAS muestra/oculta
-  el inspector de filas. Toda accion cierra el menu; un derecho sobre
-  el menu abierto tambien lo cierra.
+  BORRAR/FILAS/EXPORT) pegado al cursor (clamp a la ventana). FIX hace
+  pin, FRENTE es op 3, CLON es op 9, BORRAR es op 2, FILAS muestra/
+  oculta el inspector de filas, EXPORT es op 10. Toda accion cierra el
+  menu; un derecho sobre el menu abierto tambien lo cierra.
 - **Doble clic fija**: `WM_LBUTTONDBLCLK` (registro con `CS_DBLCLKS`)
   toggle del pin (FLG bit 8), manda al frente y lo deja con foco.
 - **Filas SM editables desde la GUI**: panel fijado "Filas SM" que
@@ -209,9 +209,26 @@ La interfaz dejo de ser dibujo sin proposito:
   (arg ±64, ejecuta `exRows` en el acto). Cada cambio entra al log con
   **undo de la fila entera** (ci `-5`: valores previos + puntero
   validado contra `M[]` vivo al deshacer).
-- **Paneles meta que re-aparecen**: `linkeaMeta()` re-vincula Menu y
-  Filas SM cuando vuelven del `oroga.dbg` (sin duplicarlos); si el
-  archivo no los tenia, `creaMenu`/`creaFilas` los crean.
+- **Paneles meta que re-aparecen**: `linkeaMeta()` re-vincula Menu,
+  Colador y Filas SM cuando vuelven del `oroga.dbg` (sin duplicarlos);
+  si el archivo no los tenia, creaMenu/creaFilas/creaColador los crean.
+
+## gLin dinamico, sliders del colador y exportar
+
+- **Lista colada sin techo**: `gLin` era un array fijo de 1024 y el
+  pintador avisaba por stderr cuando el colado se pasaba. Ahora es
+  dinamica y crece al doble (1024, 2048, ...) sin nunca recortar: el
+  pick y el pintador siguen compartiendo el mismo orden.
+- **Panel "Colador" con los pesos vivos**: tres sliders ANTI/IMP/
+  URG (`CI_EXT` 100/101/102) que nacen con los pesos reales
+  (`gColAnti`/`gColImp`/`gColUrg`). Mover un slider aplica al toque:
+  `inspAplica` setea el peso y llama `colador()` en el mismo evento,
+  asi la imagen colada reacciona mientras arrastras.
+- **Exportar lo pintado**: tecla `E` o EXPORT del menu derecho (op 10
+  del escritor) vuelca el frame entero a `ser_exp.ppm` (P6, RGB).
+  Es el pie del roadmap de export/documentos: la propia GUI produce
+  una imagen que otros programas pueden abrir.
+- Ayuda del pie actualizada: `V-P-D-E en menu derecho`.
 
 ## Compilar
 
@@ -225,7 +242,7 @@ En Dev-C++ (Proyecto Win32 GUI, C++11) o Makefile.win → target `Ser.o` +
 enlazado con `-luser32 -lgdi32`. Con ventana abre un editor de controles:
 botones, checks, sliders, redondeados, caches, sesiones anidadas.
 
-Sin modificar nada, `main()` corre primero la batería de pruebas (74/74 PASA,
+Sin modificar nada, `main()` corre primero la batería de pruebas (82/82 PASA,
 sin ventana) y escribe `ser_check.ppm` 800x520 como render de verificación.
 
 ## Formato
@@ -272,7 +289,8 @@ sin ventana) y escribe `ser_check.ppm` 800x520 como render de verificación.
   sesion de los puntitos, ahi si borralo una vez). **Autosave**:
   al cerrar la ventana (`WM_DESTROY`) se volca `oroga.dbg` con la
   sesion completa. Recortes con aviso en stderr: arbol > 1024 nodos,
-  colado > 1024, cola `oRing` llena (la orden se pierde, no corrompe).
+  cola `oRing` llena (la orden se pierde, no corrompe); la lista
+  colada ya no recorta: crece dinamica al doble.
 - Ventana: **resize y maximizar permitidos** — `WM_SIZE` recrea `gImg`
   con el tamaño nuevo, llena el fondo, invalida el frame completo y
   actualiza `gRoot` (el encabezado `BITMAPINFO` se refresca por frame).
