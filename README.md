@@ -248,6 +248,42 @@ La interfaz dejo de ser dibujo sin proposito:
 - Direcciones futuras de la fila `x` (quedan): ticks a profundidad y
   semi-arcos texturizados.
 
+## Tipografia de datos: glifos de conectores, nada hardcodeado
+
+La tipografia dejo de ser un switch fijo: ahora es **dato**. Cada contexto
+(`ui`, `3d`, el que venga) tiene su `Fuente` con catalogo dinamico de
+`Glifo`s: un glifo es una **polyline de conectores** entre puntos (contornos
+a escala libre, el espesor de linea es la escala) **o un bitmap en variable**
+(1 byte por pixel, 0/1, escala entera). Igual que el resto del Ser:
+condiciones + asignacion, cero constantes de layout quemadas.
+
+- **Gasto minimo por letra**: el em-cuadro es propio de cada glifo. La `i`
+  es 2x7 con 4 puntos; la `m` es 9x7 con 6 puntos; un marcador puede ser un
+  bitmap 3x2. Nada fuerza una regla comun.
+- **Espaciado por consecutividad**: la fuente guarda pares `(a, b, dx)`
+  (`K` en el archivo): la distancia entre dos letras depende de la
+  consecutividad, no de una regla. Pares como i-u e i-m pueden llevar
+  espaciados distintos; los pares no declarados usan 0.
+- **Faltante al nativo de socorro**: si un byte no tiene glifo en la fuente
+  del contexto, cae al 5x3 fijo (`fGly`) que nunca puede fallar. Sin fuente
+  cargada, todo el texto sale por el nativo.
+- **Persistencia por contexto**: al salir, cada fuente con cambios se guarda
+  a disco (`fuente-ui.txt`, `fuente-3d.txt`); al arrancar se recargan y
+  invalidan los caches. Agregar o quitar glifos en vivo (`fuentePone`/
+  `fuenteQuita`/`espPone`) marca la deuda `sucio` y el archivo nace solo.
+  Formato de texto, por glifo:
+
+  ```
+  G <cod> <an> <alt> <nP> <nR>    # glifo: codigo, em-cuadro, puntos | filas
+  P <x0> <y0> <x1> <y1> ...       # conectores: 2*nP numeros, polyline
+  R 10110...                      # bitmap: <nR> lineas de <an> digitos 0/1
+  K <a> <b> <dx>                  # espaciado por consecutividad
+  ```
+
+Espera conectar `texto()` con tipografias traidas de discos reales (cargar
+fuentes del sistema queda como fila pendiente); lo de hoy ya soporta
+patrones simbolicos propios por layout/contexto con alta y baja en vivo.
+
 ## Compilar
 
 Con GCC (MinGW64 en Windows):
@@ -260,7 +296,7 @@ En Dev-C++ (Proyecto Win32 GUI, C++11) o Makefile.win → target `Ser.o` +
 enlazado con `-luser32 -lgdi32`. Con ventana abre un editor de controles:
 botones, checks, sliders, redondeados, caches, sesiones anidadas.
 
-Sin modificar nada, `main()` corre primero la batería de pruebas (85/85 PASA,
+Sin modificar nada, `main()` corre primero la batería de pruebas (91/91 PASA,
 sin ventana) y escribe `ser_check.ppm` 800x520 como render de verificación.
 
 ## Formato

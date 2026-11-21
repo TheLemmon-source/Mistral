@@ -552,6 +552,35 @@ static const char* fGly(char c) {
     return "00000";
 }
 
+// ---- [L2] tipografias de datos: glifo = conectores entre puntos -------------
+// Nada hardcodeado: el glifo es DATO (puntos del em-cuadro que se conectan con
+// lineas, o bitmap en variable). Cada glifu gasta lo minimo: la i angosta,
+// la m ancha, con su propio alto. El nativo 5x3 de arriba queda de socorro
+// cuando el contexto no tiene glifos (por la causa que fuere).
+struct Glifo {
+    long cod;                // el byte 0..255 que dibuja (letras, digitos, simbolos)
+    long an, alt;            // em-cuadro propio del glifo (diferente por letra)
+    long nP;                 // conectores: polyline de puntos, escala libre
+    long* pts;               // pares x,y (y=0 arriba), unidades del em-cuadro
+    long nR;                 // bitmap en variable: nR filas x an bytes (0/1)
+    unsigned char* bmp;
+    long vr;                 // version del glifo (cachés/cosmetica)
+};
+struct Fuente {              // una tipografia por layout/contexto
+    const char* ctx;         // "ui", "3d", el que venga
+    const char* arch;        // persiste a disco por contexto, un archivo por uso
+    struct Glifo* gl;
+    long nG, cG;             // catalogo dinamico: agrega/quita segun demanda
+    long* kr;                // espaciado por consecutividad: (a,b,dx) por par
+    long nK, cK;
+    long sucio;              // algo cambio: hay que guardar a disco
+};
+static struct Fuente gFuUI = { "ui", "fuente-ui.txt", 0, 0, 0, 0, 0, 0, 0 };
+static struct Fuente gFu3D = { "3d", "fuente-3d.txt", 0, 0, 0, 0, 0, 0, 0 };
+static struct Fuente* gFuAct = 0;        // el texto() pinta por este contexto
+static void textoFu(struct Fuente* F, float x, float y, const char* t,
+                    unsigned int c, float esc);
+
 // ---- [R] raster: cache por zonas segun version ------------------------------
 static long gW = 800, gH = 520;
 static unsigned int* gImg = 0;         // ARGB empaquetado
@@ -627,6 +656,10 @@ static void rectoQ(float x, float y, float w, float h, unsigned int c, float rad
         }
 }
 static void texto(float x, float y, const char* t, unsigned int c) {
+    if (gFuAct && gFuAct->nG) {          // comando con datos: vector por glifo
+        textoFu(gFuAct, x, y, t, c, gFS < 1 ? 1.0f : (float)gFS);
+        return;
+    }
     long sc = gFS < 1 ? 1 : gFS;
     for (long k = 0; t[k]; k++) {
         const char* g = fGly(t[k]);
@@ -654,6 +687,240 @@ static void linea(long x0, long y0, long x1, long y1, unsigned int c) {
         if (e2 > -dy) { er -= dy; x0 += sx; }
         if (e2 < dx) { er += dx; y0 += sy; }
     }
+}
+
+// ---- [L3] fuentes en archivos: catalogo dinamico + espaciado por pares ------
+static struct Glifo* fuenteDame(struct Fuente* F, long cod) {
+    if (!F) return 0;
+    for (long i = 0; i < F->nG; i++)
+        if (F->gl[i].cod == cod) return &F->gl[i];
+    return 0;
+}
+static long espDame(struct Fuente* F, long a, long b) {  // consecutividad
+    if (!F) return 0;
+    for (long i = 0; i < F->nK; i++)
+        if (F->kr[i * 3] == a && F->kr[i * 3 + 1] == b)
+            return F->kr[i * 3 + 2];
+    return 0;
+}
+static struct Glifo* fuentePone(struct Fuente* F, long cod, long an, long alt,
+                                long nP, long nR) {
+    if (!F || cod < 0 || cod > 255) return 0;
+    if (an < 1) an = 1;
+    if (alt < 1) alt = 1;
+    if (nP < 0) nP = 0;
+    if (nR < 0) nR = 0;
+    if (nP > 512 || nR > 200 || an > 200 || alt > 200) return 0;
+    struct Glifo* g = fuenteDame(F, cod);
+    if (!g) {                            // catalogo dinamico: crece al doble
+        if (F->nG >= F->cG) {
+            long nc = F->cG < 4 ? 4 : F->cG * 2;
+            struct Glifo* nl = (struct Glifo*)xM((unsigned long)nc
+                                                 * sizeof(struct Glifo));
+            for (long i = 0; i < F->nG; i++) nl[i] = F->gl[i];
+            xMe((void*)F->gl);
+            F->gl = nl; F->cG = nc;
+        }
+        g = &F->gl[F->nG++];
+    } else {                             // mismo codigo: reemplazo en el acto
+        if (g->pts) xMe((void*)g->pts);
+        if (g->bmp) xMe((void*)g->bmp);
+    }
+    g->cod = cod; g->an = an; g->alt = alt;
+    g->nP = nP; g->nR = nR; g->pts = 0; g->bmp = 0; g->vr++;
+    if (nP > 0) {
+        g->pts = (long*)xM((unsigned long)(nP * 2) * sizeof(long));
+        for (long i = 0; i < nP * 2; i++) g->pts[i] = 0;
+    }
+    if (nR > 0) {
+        g->bmp = (unsigned char*)xM((unsigned long)(nR * an));
+        for (long i = 0; i < nR * an; i++) g->bmp[i] = 0;
+    }
+    F->sucio = 1;
+    return g;
+}
+static void fuenteQuita(struct Fuente* F, long cod) {    // segun demanda
+    if (!F) return;
+    for (long i = 0; i < F->nG; i++) {
+        if (F->gl[i].cod != cod) continue;
+        if (F->gl[i].pts) xMe((void*)F->gl[i].pts);
+        if (F->gl[i].bmp) xMe((void*)F->gl[i].bmp);
+        for (long j = i; j < F->nG - 1; j++) F->gl[j] = F->gl[j + 1];
+        F->nG--;
+        F->sucio = 1;
+        return;
+    }
+}
+static void espPone(struct Fuente* F, long a, long b, long dx) {
+    if (!F) return;
+    for (long i = 0; i < F->nK; i++)
+        if (F->kr[i * 3] == a && F->kr[i * 3 + 1] == b) {
+            F->kr[i * 3 + 2] = dx;
+            F->sucio = 1;
+            return;
+        }
+    if (F->nK >= F->cK) {                // pares dinamicos: doble y copia
+        long nc = F->cK < 8 ? 8 : F->cK * 2;
+        long* nl = (long*)xM((unsigned long)nc * 3 * sizeof(long));
+        for (long i = 0; i < F->nK * 3; i++) nl[i] = F->kr[i];
+        xMe((void*)F->kr);
+        F->kr = nl; F->cK = nc;
+    }
+    F->kr[F->nK * 3] = a;
+    F->kr[F->nK * 3 + 1] = b;
+    F->kr[F->nK * 3 + 2] = dx;
+    F->nK++;
+    F->sucio = 1;
+}
+static float anchoFu(struct Fuente* F, const char* t, float esc) {
+    float w = 0;
+    long ant = 0;
+    for (long k = 0; t && t[k]; k++) {
+        long cc = (unsigned char)t[k];
+        long dx = ant ? espDame(F, ant, cc) : 0;
+        struct Glifo* g = fuenteDame(F, cc);
+        long sc = (long)(esc < 1 ? 1 : esc);
+        w += (float)(g ? g->an + dx : 5 * sc + dx);
+        ant = cc;
+    }
+    return w * esc;
+}
+static void glifoDibuja(struct Glifo* g, float x, float y, unsigned int c,
+                        float esc) {
+    if (g->nP > 0 && g->pts) {           // conectores: polyline a escala libre
+        long th = (long)(esc < 1 ? 1 : esc);
+        for (long p = 0; p + 1 < g->nP; p++) {
+            float x0 = x + (float)g->pts[p * 2] * esc;
+            float y0 = y + (float)g->pts[p * 2 + 1] * esc;
+            float x1 = x + (float)g->pts[p * 2 + 2] * esc;
+            float y1 = y + (float)g->pts[p * 2 + 3] * esc;
+            for (long o = 0; o < th; o++) // espesor = esc: linea gruesa a gusto
+                linea((long)x0, (long)y0 + o, (long)x1, (long)y1 + o, c);
+        }
+    } else if (g->nR > 0 && g->bmp) {    // bitmap en variable: escala entera
+        long oe = (long)(esc < 1 ? 1 : esc);
+        for (long r = 0; r < g->nR; r++)
+            for (long i2 = 0; i2 < g->an; i2++)
+                for (long b2 = 0; b2 < oe; b2++)
+                    for (long a2 = 0; a2 < oe; a2++)
+                        if (g->bmp[r * g->an + i2])
+                            px((int)(x + i2 * oe + a2),
+                               (int)(y + r * oe + b2), c);
+    }
+}
+static void textoFu(struct Fuente* F, float x, float y, const char* t,
+                    unsigned int c, float esc) {
+    float cx = x;
+    long ant = 0;
+    for (long k = 0; t && t[k]; k++) {
+        long cc = (unsigned char)t[k];
+        struct Glifo* g = fuenteDame(F, cc);
+        long dx = ant ? espDame(F, ant, cc) : 0;
+        if (g) {
+            glifoDibuja(g, cx, y, c, esc);
+            cx += (float)(g->an + dx) * esc;
+        } else {                         // glifo faltante: nativo 5x3 de socorro
+            long sc = (long)(esc < 1 ? 1 : esc);
+            const char* gn = fGly((char)cc);
+            for (long j = 0; j < 5; j++) {
+                int fil = gn[j] - '0';
+                for (long i2 = 0; i2 < 3; i2++) {
+                    if (((fil >> (2 - i2)) & 1) == 0) continue;
+                    for (long b2 = 0; b2 < sc; b2++)
+                        for (long a2 = 0; a2 < sc; a2++)
+                            px((int)(cx + i2 * sc + a2 + 1),
+                               (int)(y + j * sc + b2 + 1), c);
+                }
+            }
+            cx += 5 * sc + (float)dx;
+        }
+        ant = cc;
+    }
+}
+static long lnLong(const char* l, long vi) {   // i-esimo numero de la linea
+    long i = 0;
+    while (*l) {
+        while (*l == ' ' || *l == '\t' || *l == ',') l++;
+        if (*l == 0) break;
+        if (*l == '-' || (*l >= '0' && *l <= '9')) {
+            char* fin = 0;
+            long v = strtol(l, &fin, 10);
+            if (i++ == vi) return v;
+            l = fin;
+        } else {
+            while (*l && *l != ' ' && *l != '\t' && *l != ',') l++;
+        }
+    }
+    return 0;
+}
+static long fuenteCarga(struct Fuente* F) {  // agrega del disco: G/P/R/K
+    if (!F || !F->arch) return 0;
+    FILE* f = fopen(F->arch, "rb");
+    if (!f) return 0;
+    char ln[2048];
+    struct Glifo* pend = 0;
+    long nr = 0;
+    while (fgets(ln, sizeof(ln), f)) {
+        for (char* q = ln; *q; q++) if (*q == '\n' || *q == '\r') *q = 0;
+        char* l = ln;
+        while (*l == ' ' || *l == '\t') l++;
+        if (*l == 0 || *l == '#') continue;
+        if (l[0] == 'G') {
+            long cod = lnLong(l, 0), an = lnLong(l, 1), alt = lnLong(l, 2);
+            long nP = lnLong(l, 3), nR = lnLong(l, 4);
+            pend = fuentePone(F, cod, an, alt, nP, nR);   // topea adentro
+            nr = 0;
+        } else if (l[0] == 'P' && pend && pend->nP > 0 && pend->pts) {
+            for (long i = 0; i < pend->nP * 2; i++)
+                pend->pts[i] = lnLong(l, i);
+        } else if (l[0] == 'R' && pend && pend->nR > nr && pend->bmp) {
+            long i2 = 0;
+            for (char* q = l + 1; *q && i2 < pend->an; q++)
+                if (*q == '0' || *q == '1')
+                    pend->bmp[nr * pend->an + i2++] = (unsigned char)(*q - '0');
+            nr++;
+        } else if (l[0] == 'K') {
+            espPone(F, lnLong(l, 0), lnLong(l, 1), lnLong(l, 2));
+        }
+    }
+    fclose(f);
+    F->sucio = 0;                        // recien cargada: sin deuda al disco
+    return 1;
+}
+static void fuenteGuarda(struct Fuente* F) { // el layout entero a su archivo
+    if (!F || !F->arch || !F->sucio) return;
+    FILE* f = fopen(F->arch, "wb");
+    if (!f) return;
+    fprintf(f, "# fuente contexto %s\n", F->ctx);
+    for (long i = 0; i < F->nG; i++) {
+        struct Glifo* g = &F->gl[i];
+        fprintf(f, "G %ld %ld %ld %ld %ld\n", g->cod, g->an, g->alt,
+                g->nP, g->nR);
+        if (g->nP > 0 && g->pts) {
+            fprintf(f, "P");
+            for (long p = 0; p < g->nP * 2; p++) fprintf(f, " %ld", g->pts[p]);
+            fprintf(f, "\n");
+        }
+        for (long r = 0; g->nR > 0 && g->bmp && r < g->nR; r++) {
+            fprintf(f, "R ");
+            for (long i2 = 0; i2 < g->an; i2++)
+                fprintf(f, "%c", g->bmp[r * g->an + i2] ? '1' : '0');
+            fprintf(f, "\n");
+        }
+    }
+    for (long i = 0; i < F->nK; i++)
+        fprintf(f, "K %ld %ld %ld\n", F->kr[i * 3], F->kr[i * 3 + 1],
+                F->kr[i * 3 + 2]);
+    fclose(f);
+    F->sucio = 0;
+}
+static void fuenteLibera(struct Fuente* F) {
+    if (!F) return;
+    while (F->nG) fuenteQuita(F, F->gl[F->nG - 1].cod);
+    if (F->gl) { xMe((void*)F->gl); F->gl = 0; }
+    F->nG = 0; F->cG = 0;
+    if (F->kr) { xMe((void*)F->kr); F->kr = 0; }
+    F->nK = 0; F->cK = 0; F->sucio = 0;
 }
 
 // ---- [X] camara: fila 'x' = [img,w,h,ver] -----------------------------------
@@ -1092,6 +1359,7 @@ static void pinta3D() {
     if (!gImg || !gRoot) return;
     long gFS0 = gFS;
     gTgt = gImg; gTW = gW; gTH = gH;
+    gFuAct = &gFu3D;                     // contexto 3D: su propia tipografia
     unsigned int bg = pr(0.05f, 0.06f, 0.09f, 1.0f);
     for (unsigned long i = 0; i < (unsigned long)gW * (unsigned long)gH; i++)
         gImg[i] = bg;
@@ -1207,6 +1475,7 @@ static void pinta3D() {
     texto(8, (float)gH - 12.0f,
           "3D  G:VUELVE  FLEC:GIRA  +/-:ZOOM  CLIC:ELIGE", pr(0.5f, 0.55f, 0.6f, 1.0f));
     gFS = gFS0;
+    gFuAct = 0;
     gImgGen = -1;                        // en 3D se repinta cada frame
 }
 static void pintaTodo() {
@@ -1214,6 +1483,7 @@ static void pintaTodo() {
     if (g3D) { pinta3D(); return; }      // 3D: vista orbital de la escena
     if (gImgGen == gGen && gCamVisto == gCamVer) return;   // nada cambio en TODO
     gTgt = gImg; gTW = gW; gTH = gH;
+    gFuAct = &gFuUI;                     // el texto del mundo sale con su fuente
     gLinN = 0;
     listaRec(gRoot);                              // pick comparte el colado
     if (gRoot) {
@@ -1243,6 +1513,7 @@ static void pintaTodo() {
     }
     gImgGen = gGen;
     gCamVisto = gCamVer;
+    gFuAct = 0;
 }
 
 // ---- [K] pick por zonas anidables (mismo orden de colado) ------------------
@@ -2993,6 +3264,66 @@ static void pruebas() {
                 gImg[(long)(430 + j) * gW + 300 + i2] = bk2[j * 20 + i2];
         gFS = fs0;
     }
+    {                                // tipografia de datos: glifos de conectores
+        struct Fuente* F = &gFuUI;
+        struct Glifo* gi = fuentePone(F, 'i', 2, 7, 4, 0);   // i angosta: minima
+        if (gi) {
+            long p2[8] = { 1, 0, 1, 5, 1, 5, 1, 7 };
+            for (long i2 = 0; i2 < 8; i2++) gi->pts[i2] = p2[i2];
+        }
+        struct Glifo* gm = fuentePone(F, 'm', 9, 7, 6, 0);   // m ancha: sus puntos
+        if (gm) {
+            long p3[12] = { 0, 7, 0, 0, 4, 4, 8, 0, 8, 7, 4, 4 };
+            for (long i2 = 0; i2 < 12; i2++) gm->pts[i2] = p3[i2];
+        }
+        printf("glifo angosto vs ancho: %s (i an=%ld m an=%ld)\n",
+               (gi && gm && gi->an < gm->an) ? "PASA" : "FALLA",
+               gi ? gi->an : -1, gm ? gm->an : -1);
+        float w0 = anchoFu(F, "im", 1.0f);    // sin par: cada glifo su ancho
+        espPone(F, 'i', 'm', 2);     // consecutividad: i antes de m corre 2
+        float wim = anchoFu(F, "im", 1.0f);   // con par i-m: corre +2
+        printf("espaciado por consecutividad: %s (sin %.0f vs con %.0f)\n",
+               (wim - w0 == 2.0f) ? "PASA" : "FALLA", w0, wim);
+        struct Glifo* gb = fuentePone(F, 254, 3, 2, 0, 2);   // bitmap: cuadrito
+        if (gb)
+            for (long r = 0; r < 2; r++)
+                for (long i2 = 0; i2 < 3; i2++)
+                    gb->bmp[r * 3 + i2] = (unsigned char)(r == 0 || i2 == 0);
+        printf("glifo bitmap en variable: %s\n",
+               (gb && gb->bmp && gb->nR == 2) ? "PASA" : "FALLA");
+        long fs0 = gFS;
+        static unsigned int bk3[16 * 60];
+        for (long j = 0; j < 16; j++)
+            for (long i2 = 0; i2 < 60; i2++)
+                bk3[j * 60 + i2] = gImg[(long)(430 + j) * gW + 300 + i2];
+        for (long j = 0; j < 16; j++)
+            for (long i2 = 0; i2 < 60; i2++)
+                gImg[(long)(430 + j) * gW + 300 + i2] = 0;
+        gFS = 2; gFuAct = F;             // el mismo texto() sale por el contexto
+        texto(300.0f, 430.0f, "imq", pr(1, 1, 1, 1));   // q sin glifu: nativo 5x3
+        long nx = 0;
+        for (long j = 0; j < 16; j++)
+            for (long i2 = 0; i2 < 60; i2++)
+                if (gImg[(long)(430 + j) * gW + 300 + i2]) nx++;
+        printf("texto con contexto vectorial (faltante al nativo): %s (%ld px)\n",
+               nx > 12 ? "PASA" : "FALLA", nx);
+        for (long j = 0; j < 16; j++)
+            for (long i2 = 0; i2 < 60; i2++)
+                gImg[(long)(430 + j) * gW + 300 + i2] = bk3[j * 60 + i2];
+        gFS = fs0; gFuAct = 0;
+        fuenteGuarda(F);                 // el layout entero a su archivo
+        fuenteQuita(F, 'm');
+        long sinM = fuenteDame(F, 'm') == 0;
+        long cargo = fuenteCarga(F);     // recarga: el archivo lo devuelve
+        long leDuelve = fuenteDame(F, 'm') && espDame(F, 'i', 'm') == 2;
+        printf("guarda/quita/carga el layout: %s\n",
+               (sinM && cargo && leDuelve) ? "PASA" : "FALLA");
+        fuenteQuita(F, 254);             // agrega/quita en vivo: ud. manda
+        printf("agrega/quita en vivo: %s\n",
+               (fuentePone(F, 253, 3, 5, 2, 0) && fuenteDame(F, 253) &&
+                (fuenteQuita(F, 253), fuenteDame(F, 253) == 0)) ? "PASA" : "FALLA");
+        remove("fuente-ui.txt");
+    }
     {                                    // export: tecla E -> ser_exp.ppm
         remove("ser_exp.ppm");
         tecla('E'); escritor();
@@ -3021,6 +3352,8 @@ static void pruebas() {
     for (long i = 0; i < gCemN; i++) serAl(gCem[i]);   // cementerio fuera
     gCemN = 0;
     printf("seres: %ld vivos (%ld antes)\n", gVivos, vivos0);
+    fuenteLibera(&gFuUI);                // tipografias de datos: fuera
+    fuenteLibera(&gFu3D);
     xMe((void*)gImg); gImg = 0;      // sin fuga al salir
     printf("pruebas listas: ser_check.ppm\n");
 }
@@ -3041,6 +3374,8 @@ static LRESULT CALLBACK wnProc(HWND v, UINT m, WPARAM w, LPARAM l) {
     case WM_DESTROY:                    // autosave: la sesion sobrevive la X
         ordP(4, 0,0,0,0,0,0,0);
         escritor();
+        fuenteGuarda(&gFuUI);            // cada tipografia a su archivo si cambio
+        fuenteGuarda(&gFu3D);
         PostQuitMessage(0); return 0;
     case WM_MOUSEMOVE: {
         if (g3D) {                       // orbita: arrastrar = girar la camara
@@ -3159,6 +3494,8 @@ int PASCAL WinMain(HINSTANCE i, HINSTANCE p, LPSTR c, int s) {
     linkeaMeta();                        // el archivo ya los tenia: se reusan
     if (!gMenu) creaMenu();              // organos meta-UI reaceden si faltan
     if (!gInsp2) creaFilas();
+    if (fuenteCarga(&gFuUI)) gGen++;     // tipografias del sistema o del layout
+    if (fuenteCarga(&gFu3D)) gGen++;     // (si no hay: el nativo 5x3 de socorro)
     parArranca();                        // par vigilante: tic + fuente de camara
     BITMAPINFO bi;
     ZeroMemory(&bi, sizeof(bi));
