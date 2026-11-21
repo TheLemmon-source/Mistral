@@ -285,6 +285,21 @@ Espera conectar `texto()` con tipografias traidas de discos reales (cargar
 fuentes del sistema queda como fila pendiente); lo de hoy ya soporta
 patrones simbolicos propios por layout/contexto con alta y baja en vivo.
 
+## Datos junto al exe: una raiz propia, ramificando desde ahi
+
+Los datos del programa ya no caen regados por el directorio actual: viven
+en una carpeta con el nombre del exe, en la carpeta donde el exe reside.
+`Ser.exe` en `C:\algo\` usa `C:\algo\Ser\`; ahi dentro van el layout
+(`oroga.dbg`), las tipografias por contexto (`fuente-ui.txt`,
+`fuente-3d.txt`) y los exportes (`ser_exp.ppm`, `ser_check.ppm`).
+
+La raiz se arma una sola vez al arrancar (idempotente, con separador
+final listo para ramas) y todo acceso a datos pasa por `fopenD`/
+`removeD`, que agregan la raiz a cada nombre relativo: ramas nuevas
+(subcarpetas de fuentes, escenas, documentos) se agregan sin
+reconstruir lecturas por arbol de directorios. Sin extension el nombre
+lleva sufijo `_d` para no chocar con el propio exe.
+
 ## Compilar
 
 Con GCC (MinGW64 en Windows):
@@ -297,7 +312,7 @@ En Dev-C++ (Proyecto Win32 GUI, C++11) o Makefile.win → target `Ser.o` +
 enlazado con `-luser32 -lgdi32`. Con ventana abre un editor de controles:
 botones, checks, sliders, redondeados, caches, sesiones anidadas.
 
-Sin modificar nada, `main()` corre primero la batería de pruebas (91/91 PASA,
+Sin modificar nada, `main()` corre primero la batería de pruebas (92/92 PASA,
 sin ventana) y escribe `ser_check.ppm` 800x520 como render de verificación.
 
 ## Formato

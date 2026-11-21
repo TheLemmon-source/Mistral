@@ -45,6 +45,77 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#if defined(_WIN32)
+#include <windows.h>
+#else
+#include <unistd.h>
+#include <sys/stat.h>
+#endif
+
+// ---- [D] datos junto al exe: <dir del exe>/<exe base>/ ----------------------
+// Los datos del programa (layout, tipografias, exportes) viven en una carpeta
+// con el nombre del exe, ramificando desde donde el exe vive. La raiz es una
+// sola vez al arrancar (idempotente); todo acceso a datos pasa por fopenD/
+// removeD, que agregan la raiz a cada nombre relativo: arbol de datos propio
+// con ramas nuevas (subcarpetas) sin reconstruir lecturas por directorios.
+static char gDirDatos[1204] = { 0 };     // con separador final; vacio = cwd
+
+static void dirDatosArma(void) {
+    if (gDirDatos[0]) return;            // ya armada: nada de rehacer
+    char ex[1204];
+    long n = 0;
+#if defined(_WIN32)
+    n = (long)GetModuleFileNameA(0, ex, (DWORD)sizeof(ex));
+    if (n > 0 && n < (long)sizeof(ex)) ex[n] = 0; else n = 0;
+#else
+    n = (long)readlink("/proc/self/exe", ex, sizeof(ex) - 1);
+    if (n > 0) ex[n] = 0; else n = 0;
+#endif
+    if (n <= 0) return;                  // sin ruta: cwd, todo sigue como era
+    long sep = -1;
+    for (long i = 0; i < n; i++)
+        if (ex[i] == '/' || ex[i] == '\\') sep = i;
+    if (sep < 0) return;                 // exe relativo al cwd: cwd mismo
+    long dot = -1;
+    for (long i = n - 1; i > sep; i--) {
+        if (ex[i] == '.') { dot = i; break; }
+        if (ex[i] == '/' || ex[i] == '\\') break;
+    }
+    long ext = dot > sep;                // extension despues del ultimo tramo
+    long base1 = ext ? dot : n;
+    long b = 0;
+    for (long i = 0; i <= sep; i++)
+        if (b + 1 < (long)sizeof(gDirDatos)) gDirDatos[b++] = ex[i];
+    for (long i = sep + 1; i < base1; i++)
+        if (b + 1 < (long)sizeof(gDirDatos)) gDirDatos[b++] = ex[i];
+    if (!ext) {                          // sin extension: el nombre chocaria
+        if (b + 3 < (long)sizeof(gDirDatos)) {   // con el propio exe
+            gDirDatos[b++] = '_';
+            gDirDatos[b++] = 'd';
+        }
+    }
+    if (b + 1 < (long)sizeof(gDirDatos)) gDirDatos[b++] = ex[sep];
+    gDirDatos[b] = 0;                    // separador final: listo para ramas
+#if defined(_WIN32)
+    CreateDirectoryA(gDirDatos, 0);      // ya existe: se ignora
+#else
+    mkdir(gDirDatos, 0755);
+#endif
+}
+static FILE* fopenD(const char* nom, const char* mod) {  // dato = raiz + nom
+    char p[1300];
+    if (!gDirDatos[0] || nom[0] == '/' || nom[0] == '\\'
+        || (nom[0] && nom[1] == ':')) return fopen(nom, mod);
+    snprintf(p, sizeof(p), "%s%s", gDirDatos, nom);
+    return fopen(p, mod);
+}
+static long removeD(const char* nom) {
+    char p[1300];
+    if (!gDirDatos[0] || nom[0] == '/' || nom[0] == '\\'
+        || (nom[0] && nom[1] == ':')) return remove(nom) == 0;
+    snprintf(p, sizeof(p), "%s%s", gDirDatos, nom);
+    return remove(p) == 0;
+}
 
 #define QZ    256
 #define CI_X   0
@@ -845,7 +916,7 @@ static long lnLong(const char* l, long vi) {   // i-esimo numero de la linea
 }
 static long fuenteCarga(struct Fuente* F) {  // agrega del disco: G/P/R/K
     if (!F || !F->arch) return 0;
-    FILE* f = fopen(F->arch, "rb");
+    FILE* f = fopenD(F->arch, "rb");
     if (!f) return 0;
     char ln[2048];
     struct Glifo* pend = 0;
@@ -879,7 +950,7 @@ static long fuenteCarga(struct Fuente* F) {  // agrega del disco: G/P/R/K
 }
 static void fuenteGuarda(struct Fuente* F) { // el layout entero a su archivo
     if (!F || !F->arch || !F->sucio) return;
-    FILE* f = fopen(F->arch, "wb");
+    FILE* f = fopenD(F->arch, "wb");
     if (!f) return;
     fprintf(f, "# fuente contexto %s\n", F->ctx);
     for (long i = 0; i < F->nG; i++) {
@@ -1629,7 +1700,7 @@ static void escritor() {
         } else if (o->k == 3) {                  // mando al frente (z)
             if (o->t) mandaAlFrente(o->t);
         } else if (o->k == 4) {                  // guardar oroga.dbg
-            FILE* f = fopen(gRuta, "wb");
+            FILE* f = fopenD(gRuta, "wb");
             if (f) {
                 long idx = 0; long cort = 0;
                 Ser* lin[1024]; long folto[1024];
@@ -1713,7 +1784,7 @@ static void escritor() {
                 }
             }
         } else if (o->k == 10) {                  // exportar lo pintado: PPM
-            FILE* f = fopen("ser_exp.ppm", "wb");
+            FILE* f = fopenD("ser_exp.ppm", "wb");
             if (f) {
                 fprintf(f, "P6\n%ld %ld\n255\n", gW, gH);
                 for (long i = 0; i < gW * gH; i++) {
@@ -2142,7 +2213,7 @@ static long campoTxt(const char* l, long idx, char* out, long mx) {
 }
 static void desEscenaRoot();
 static __attribute__((unused)) long desEscena(const char* ruta) {
-    FILE* f = fopen(ruta, "rb");
+    FILE* f = fopenD(ruta, "rb");
     if (!f) return 0;
     if (!gRoot) desEscenaRoot();
     char lin[512];
@@ -2575,7 +2646,7 @@ static void pruebas() {
     }
     ordP(4, 0, 0, 0, 0, 0, 0, 0);
     escritor();
-    FILE* f = fopen(gRuta, "rb");
+    FILE* f = fopenD(gRuta, "rb");
     if (f) { fclose(f); guardado = 1; }
     long vivos0 = gVivos;
     for (long i = 0; i < gRoot->nA; i++) {          // baseline: forzar full
@@ -2934,7 +3005,7 @@ static void pruebas() {
     escritor();
     printf("seres sin fuga en serccion: %s\n", guardado ? "PASA" : "FALLA");
     long nN = 0;
-    FILE* q = fopen(gRuta, "rb");
+    FILE* q = fopenD(gRuta, "rb");
     if (q) {
         char lb2[512];
         while (fgets(lb2, sizeof(lb2), q)) if (lb2[0] == 'N') nN++;
@@ -3013,7 +3084,7 @@ static void pruebas() {
     gImgGen = -1; pintaTodo();                   // el camino que crasheaba en Win
     printf("render tras recarga: %s\n", gImg && gRoot ? "PASA" : "FALLA");
     {                                            // migracion: renglon formato viejo
-        FILE* v = fopen(gRuta, "wb");
+        FILE* v = fopenD(gRuta, "wb");
         if (v) {
             fprintf(v, "N 0 -1 p Dmo 4096 4096 66560 53760 36 41 51 256 1 9 555\n");
             fclose(v);
@@ -3313,22 +3384,33 @@ static void pruebas() {
         printf("agrega/quita en vivo: %s\n",
                (fuentePone(F, 253, 3, 5, 2, 0) && fuenteDame(F, 253) &&
                 (fuenteQuita(F, 253), fuenteDame(F, 253) == 0)) ? "PASA" : "FALLA");
-        remove("fuente-ui.txt");
+        removeD("fuente-ui.txt");
+    }
+    {   // datos junto al exe: raiz propia con el nombre del exe, ramificando
+        long okd = gDirDatos[0] != 0;
+        FILE* tv = fopenD("prueba_raiz.txt", "wb");
+        if (tv) { fprintf(tv, "ramificando\n"); fclose(tv); }
+        FILE* tr = fopenD("prueba_raiz.txt", "rb");
+        long leido = tr != 0;
+        if (tr) fclose(tr);
+        long sera = removeD("prueba_raiz.txt");
+        printf("datos junto al exe (raiz '%s'): %s\n", gDirDatos,
+               (okd && leido && sera) ? "PASA" : "FALLA");
     }
     {                                    // export: tecla E -> ser_exp.ppm
-        remove("ser_exp.ppm");
+        removeD("ser_exp.ppm");
         tecla('E'); escritor();
-        FILE* e2 = fopen("ser_exp.ppm", "rb");
+        FILE* e2 = fopenD("ser_exp.ppm", "rb");
         printf("export E: %s\n", e2 ? "PASA" : "FALLA");
         if (e2) {
             char mag[2] = { 0, 0 };
             fread(mag, 1, 2, e2);
             printf("export P6: %s",(mag[0] == 'P' && mag[1] == '6') ? " PASA\n" : " FALLA\n");
             fclose(e2);
-            remove("ser_exp.ppm");
+            removeD("ser_exp.ppm");
         }
     }
-    FILE* o = fopen("ser_check.ppm", "wb");
+    FILE* o = fopenD("ser_check.ppm", "wb");
     if (o) {
         fprintf(o, "P6\n%ld %ld\n255\n", gW, gH);
         for (long i = 0; i < gW * gH; i++) {
@@ -3462,6 +3544,7 @@ static LRESULT CALLBACK wnProc(HWND v, UINT m, WPARAM w, LPARAM l) {
 
 int PASCAL WinMain(HINSTANCE i, HINSTANCE p, LPSTR c, int s) {
     (void)p; (void)c; (void)s;
+    dirDatosArma();                      // datos en <dir exe>/<exe>/ desde ya
     WNDCLASSA w;
     w.style = CS_OWNDC | CS_DBLCLKS;
     w.lpfnWndProc = wnProc;
@@ -3519,6 +3602,7 @@ int PASCAL WinMain(HINSTANCE i, HINSTANCE p, LPSTR c, int s) {
 #else
 int main(int argc, char** argv) {
     (void)argc; (void)argv;
+    dirDatosArma();                      // datos en <dir exe>/<exe>_d/ aqui
     pruebas();
     return 0;
 }
